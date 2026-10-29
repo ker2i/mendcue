@@ -1,6 +1,9 @@
 // REVIEW.md regression scenarios: R01 safety-before-confirmation, R09 loops.
 import { describe, expect, it } from "vitest";
 import request from "supertest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { say, startSession, testApp } from "./helpers.js";
 
 function pngBytes(): Buffer {
@@ -330,6 +333,7 @@ describe("R08 serial never replaces the model", () => {
 
 describe("R12 provider output validation", () => {
   function stubFetch(payload: unknown, opts: { ok?: boolean; status?: number; raw?: string } = {}) {
+    process.env.META_USAGE_LEDGER = join(mkdtempSync(join(tmpdir(), "meta-schema-test-")), "usage.json");
     const body = opts.raw !== undefined ? opts.raw : JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] });
     return (async () => ({
       ok: opts.ok ?? true,
@@ -342,6 +346,7 @@ describe("R12 provider output validation", () => {
     const { MetaProvider } = await import("../src/integrations/meta/meta.js");
     const { ModelFailure } = await import("../src/integrations/meta/provider.js");
     const realFetch = globalThis.fetch;
+    const priorLedger = process.env.META_USAGE_LEDGER;
     const base = {
       tenantId: "t", caseId: "c", messageId: "m", messageText: "hi",
       knownFacts: [], askedQuestionIds: [], allowedQuestionIds: [], allowedActionIds: [],
@@ -364,6 +369,7 @@ describe("R12 provider output validation", () => {
       expect(out.proposedFacts[0]).toMatchObject({ key: "brand", sourceMessageId: "m" });
     } finally {
       globalThis.fetch = realFetch;
+      if (priorLedger === undefined) delete process.env.META_USAGE_LEDGER; else process.env.META_USAGE_LEDGER = priorLedger;
     }
   });
 });

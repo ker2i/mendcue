@@ -7,6 +7,8 @@ import type {
 } from "./provider.js";
 import { ModelFailure, parseAssessmentResult, parseLabelResult, parseTurnResult } from "./provider.js";
 
+import { budgetedRequest } from "./usage.js";
+
 const BASE_URL = process.env.META_BASE_URL ?? "https://api.meta.ai/v1";
 const MODEL = process.env.META_MODEL ?? "muse-spark-1.3";
 const TIMEOUT_MS = Number(process.env.META_TIMEOUT_MS ?? 25000);
@@ -102,7 +104,13 @@ const ASSESS_SCHEMA = {
   },
 };
 
-async function postChat(apiKey: string, body: unknown): Promise<unknown> {
+async function postChat(apiKey: string, body: Record<string, unknown>, caseId: string): Promise<unknown> {
+  if (BASE_URL !== "https://api.meta.ai/v1" || MODEL !== "muse-spark-1.3") throw new ModelFailure("Only the reviewed Meta endpoint/model is enabled");
+  body.max_tokens = 2048;
+  const serialized = JSON.stringify(body);
+  const bytes = Buffer.byteLength(serialized);
+  if (bytes > 120000) throw new ModelFailure("Model context limit exceeded");
+  return budgetedRequest({ caseId, model: MODEL, bytes, request: async () => {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
@@ -120,6 +128,7 @@ async function postChat(apiKey: string, body: unknown): Promise<unknown> {
   } finally {
     clearTimeout(t);
   }
+  } });
 }
 
 function extractJson(raw: unknown): unknown {
@@ -170,7 +179,7 @@ export class MetaProvider implements ModelProvider {
         { role: "user", content: user },
       ],
       response_format: { type: "json_schema", json_schema: TURN_SCHEMA },
-    });
+    }, input.caseId);
     const parsed = parseTurnResult(extractJson(raw));
     return {
       proposedFacts: parsed.proposedFacts.map((f) => ({
@@ -186,11 +195,12 @@ export class MetaProvider implements ModelProvider {
   }
 
   async extractApplianceLabel(input: LabelInput): Promise<LabelResult> {
+    if (process.env.META_IMAGE_BILLING_REVIEWED !== "1") throw new ModelFailure("Live image billing has not been reviewed; manual identity remains available");
     const system =
       `Transcribe the appliance rating label. Return brand, exact model number preserving ` +
       `suffixes and punctuation, serial number, category guess, and visible electrical/fuel info. ` +
       `Never manufacture missing characters. Flag O/0 and I/1 ambiguity in uncertainty and set ` +
-      `ambiguousChars true when present.`;
+      `ambiguousChars true only when the image genuinely leaves a character unresolved, not merely because 0, O, I, or 1 occurs.`;
     const raw = await postChat(this.apiKey, {
       model: MODEL,
       mode: "Standard",
@@ -202,7 +212,7 @@ export class MetaProvider implements ModelProvider {
         ],
       }],
       response_format: { type: "json_schema", json_schema: LABEL_SCHEMA },
-    });
+    }, input.caseId);
     const parsed = parseLabelResult(extractJson(raw));
     const modelNormalized = parsed.modelRaw
       ? parsed.modelRaw.trim().toUpperCase().replace(/[\s_]+/g, "")
@@ -220,7 +230,7 @@ export class MetaProvider implements ModelProvider {
     };
   }
 
-  async assessCase(input: AssessmentInput): Promise<AssessmentResult> {
+  async assessCase(input: AssessmentInput, baselinePrompt?: string): Promise<AssessmentResult> {
     const system =
       `Draft up to 3 preliminary intake hypotheses from the supplied facts and ONLY the supplied ` +
       `knowledge chunks. Use qualitative evidence strength (limited/moderate/strong), never percentage ` +
@@ -235,11 +245,11 @@ export class MetaProvider implements ModelProvider {
       model: MODEL,
       mode: "Standard",
       messages: [
-        { role: "system", content: system },
+        { role: "system", content: baselinePrompt ?? system },
         { role: "user", content: user },
       ],
       response_format: { type: "json_schema", json_schema: ASSESS_SCHEMA },
-    });
+    }, input.caseId);
     return parseAssessmentResult(extractJson(raw));
   }
 }

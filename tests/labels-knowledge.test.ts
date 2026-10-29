@@ -37,7 +37,7 @@ describe("labels and knowledge", () => {
     const r = await request(app).post(`/api/v1/cases/${s.caseId}/attachments`)
       .set("authorization", `Bearer ${s.token}`)
       .field("kind", "label_photo")
-      .field("labelText", "MODEL ABC0O12") // contains O/0 ambiguity
+      .field("labelText", "MODEL ABC0O12 (unclear characters)") // contains O/0 ambiguity
       .attach("photo", pngBytes(), "label.png");
     expect(r.status).toBe(201);
     expect(r.body.ambiguous).toBe(true);
@@ -70,7 +70,7 @@ describe("labels and knowledge", () => {
     });
     expect(hits.length).toBeGreaterThan(0);
     // Demo chunks are category-level: level must not claim exact_model.
-    expect(hits[0].level).toBe("category_family");
+    expect(hits[0].level).toBe("category_only");
     const v = validateCitations([{ chunkId: "chk_nope" }], hits);
     expect(v.valid).toBe(false);
   });

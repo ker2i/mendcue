@@ -144,3 +144,13 @@ export function nextQuestion(args: {
   }
   return null;
 }
+
+export function questionRationale(id: string): string {
+  const decisions: Record<string, string> = {
+    q_fridge_cooling: "Distinguishes one-compartment from whole-appliance cooling complaint.",
+    q_washer_drain: "Records whether standing water affects visit preparation.",
+    q_washer_load: "Records the failed load context for technician follow-up.",
+    q_dw_stage: "Identifies the reported cycle stage without interpreting the cause.",
+  };
+  return decisions[id] ?? `Collects ${findQuestion(id)?.factKey ?? "an observation"} for human preparation; unknown or skip is accepted.`;
+}

@@ -56,16 +56,26 @@ API mark it as such and never present it as a live model result.
 - `src/db/` — store interface, memory + Postgres implementations, migrations, seed
 - `migrations/` — SQL schema, RLS, narrow auth paths, composite FKs
 - `tests/` — intake, safety, isolation, labels/knowledge, fallback, review regressions, PG integration
-- `scripts/browser-acceptance.mjs` — real-Chrome acceptance run (24 checks)
+- `scripts/browser-acceptance.mjs` — real-Chrome acceptance run (28 checks)
 - `docs/` — openapi, architecture, deployment, tenant-onboarding, evaluation
 - `examples/integration/` — mock webhook receiver + embed snippet
 
 ## Verification
 
 ```bash
-npm test          # API + engine suites (memory store) + real-Postgres integration
+npm test          # API + engine suites (memory store) + PGlite PostgreSQL-engine integration
 npm run typecheck
 npm run build && node scripts/browser-acceptance.mjs   # needs CHROME_BIN
 ```
 
 See `docs/evaluation.md` for the 12-scenario reviewed set and pilot grading.
+
+The next-upgrade implementation and honest remaining work are recorded in
+[verification-latest](docs/verification-latest.md). See the
+[local document import workflow](docs/knowledge-import.md),
+[paired benchmark protocol](docs/benchmark-method.md), and
+[private case collection template](docs/pilot-case-template.md).
+Live mode uses a shared local spending ledger (default $2 lifetime cap,
+$0.50 per case); unknown usage blocks further requests. Reconcile failed
+requests with provider billing before resetting it. Live vision requires
+reviewed billing configuration; manual identity entry remains available.

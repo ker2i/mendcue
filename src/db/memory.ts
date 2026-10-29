@@ -88,6 +88,7 @@ export class MemoryStore implements Store {
     return null;
   }
 
+  async clearAssessment(tenantId: string, caseId: string) { this.assessments.delete(`${tenantId}:${caseId}`); }
   async saveAssessment(a: Assessment) { this.assessments.set(`${a.tenantId}:${a.caseId}`, structuredClone(a)); }
   async getAssessment(tenantId: string, caseId: string) {
     return structuredClone(this.assessments.get(`${tenantId}:${caseId}`) ?? null);
@@ -101,8 +102,8 @@ export class MemoryStore implements Store {
     return this.events.filter((e) => e.tenantId === tenantId && e.caseId === caseId).map((e) => structuredClone(e));
   }
 
-  async saveDocument(d: KnowledgeDocument) { this.documents.set(d.id, structuredClone(d)); }
-  async saveChunk(c: KnowledgeChunk) { this.chunks.set(c.id, structuredClone(c)); }
+  async saveDocument(d: KnowledgeDocument) { if (!this.documents.has(d.id)) this.documents.set(d.id, structuredClone(d)); }
+  async saveChunk(c: KnowledgeChunk) { if (!this.chunks.has(c.id)) this.chunks.set(c.id, structuredClone(c)); }
   async listDocuments(tenantId: string) {
     return [...this.documents.values()].filter((d) => d.visibility === "shared" || d.tenantId === tenantId).map((d) => structuredClone(d));
   }

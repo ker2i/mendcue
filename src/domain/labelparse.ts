@@ -28,23 +28,9 @@ export function parseLabelText(rawText: string): ParsedLabel {
     return {
       modelRaw: labeledModel,
       serial,
-      ambiguous: /[O0Il1]/.test(labeledModel),
+      ambiguous: /[?\[\]]/.test(labeledModel) || /(?:unclear|unreadable|ambiguous)/i.test(text),
       basis: "labeled model field",
     };
   }
-  // 3. Fallback: longest digit-bearing token OUTSIDE serial-labeled spans.
-  const scrubbed = text
-    .replace(/SERIAL(?:\s+NO)?\s*[:#]?\s*[A-Z0-9.\-/]+/gi, " ")
-    .replace(/S\/N\s*[:#]?\s*[A-Z0-9.\-/]+/gi, " ")
-    .replace(/\bSN\s*[:#]?\s*[A-Z0-9.\-/]+/gi, " ");
-  const tokens = scrubbed.match(new RegExp(TOKEN, "g")) ?? [];
-  const withDigit = tokens.filter((t) => /\d/.test(t));
-  withDigit.sort((a, b) => b.length - a.length);
-  const modelRaw = withDigit[0]?.trim() ?? null;
-  return {
-    modelRaw,
-    serial,
-    ambiguous: modelRaw ? /[O0Il1]/.test(modelRaw) : false,
-    basis: modelRaw ? "unlabeled longest token (confirm with customer)" : "no candidate",
-  };
+  return { modelRaw: null, serial, ambiguous: false, basis: "no explicitly labeled model" };
 }

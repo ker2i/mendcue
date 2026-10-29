@@ -78,6 +78,7 @@ export interface Store {
 
   // assessments / handoffs / events
   saveAssessment(a: Assessment): Promise<void>;
+  clearAssessment(tenantId: string, caseId: string): Promise<void>;
   getAssessment(tenantId: string, caseId: string): Promise<Assessment | null>;
   saveHandoff(h: Handoff): Promise<void>;
   listHandoffs(tenantId: string, caseId: string): Promise<Handoff[]>;

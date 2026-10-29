@@ -75,6 +75,20 @@ describe("postgres integration", () => {
     expect((handoffs[0].snapshot as { error_codes_verbatim: string[] }).error_codes_verbatim).toContain("OE");
   });
 
+  it("persists usage basis and invalidates only the selected tenant draft assessment", async () => {
+    const tenant = (await store.getTenantBySlug("demo-phoenix-appliance"))!;
+    const document = { ...(await store.listDocuments(tenant.id))[0], id: "doc_private_upgrade", tenantId: tenant.id, visibility: "tenant_private" as const, usageBasis: "Locally supplied; operator permission recorded" };
+    await store.saveDocument(document);
+    expect((await store.listDocuments(tenant.id)).find(d=>d.id===document.id)?.usageBasis).toBe(document.usageBasis);
+    expect((await store.listDocuments("tnt_demo_harbor")).some(d=>d.id===document.id)).toBe(false);
+    const c=await createCase({store,provider:new FixtureProvider(),storageGet:async()=>null},tenant,"widget");
+    await store.saveAssessment({id:randomUUID(),tenantId:tenant.id,caseId:c.id,status:"ok",hypotheses:[],recommendedFollowUp:"Review",knowledgeLevel:"unknown",citations:[],createdAt:new Date().toISOString()});
+    await store.clearAssessment("tnt_demo_harbor",c.id);
+    expect(await store.getAssessment(tenant.id,c.id)).not.toBeNull();
+    await store.clearAssessment(tenant.id,c.id);
+    expect(await store.getAssessment(tenant.id,c.id)).toBeNull();
+  });
+
   it("denies cross-tenant reads at the app and RLS layers", async () => {
     const a = await store.getTenantBySlug("demo-phoenix-appliance");
     const b = await store.getTenantBySlug("demo-harbor-warranty");

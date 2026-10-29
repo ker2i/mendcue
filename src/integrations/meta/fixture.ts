@@ -11,13 +11,13 @@ function factsFromText(text: string, messageId: string): ProposedFact[] {
   const out: ProposedFact[] = [];
   const lower = text.toLowerCase();
   for (const b of BRANDS) {
-    if (lower.includes(b)) {
+    if (new RegExp(`\\b${b}\\b`, "i").test(text)) {
       out.push({ key: "brand", value: text.match(new RegExp(b, "i"))![0], sourceMessageId: messageId, sourceAttachmentId: null, certainty: "explicit" });
       break;
     }
   }
   if (/\b(refrigerator|fridge|freezer)\b/.test(lower)) {
-    out.push({ key: "appliance_category", value: lower.includes("freezer") ? "freezer" : "refrigerator", sourceMessageId: messageId, sourceAttachmentId: null, certainty: "explicit" });
+    out.push({ key: "appliance_category", value: /\b(fridge|refrigerator)\b/.test(lower) ? "refrigerator" : "freezer", sourceMessageId: messageId, sourceAttachmentId: null, certainty: "explicit" });
   } else if (/\b(wash(er|ing)|laundry)\b/.test(lower)) {
     out.push({ key: "appliance_category", value: "washer", sourceMessageId: messageId, sourceAttachmentId: null, certainty: "explicit" });
   } else if (/\bdishwash/.test(lower)) {

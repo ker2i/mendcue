@@ -11,7 +11,7 @@ import { detectImageMime, stripJpegMetadata } from "../integrations/storage/stor
 import { errorBody, type TenantConfig } from "../domain/types.js";
 import { bearerFrom, csrfToken, newBootstrapCode, newToken, rateLimit, requestId, sha256 } from "./auth.js";
 import { patchAsyncErrors } from "./asyncErrors.js";
-import { buildReview, confirmModelExplicit, createCase, handleHazardTurn, processLabelPhoto, processTurn, submitCase, SubmitRejected } from "../domain/intake.js";
+import { buildReview, invalidateIdentity, confirmModelExplicit, createCase, handleHazardTurn, processLabelPhoto, processTurn, submitCase, SubmitRejected } from "../domain/intake.js";
 import { screenHazards } from "../domain/safety.js";
 
 export interface AppDeps {
@@ -196,7 +196,7 @@ export function createApp(deps: AppDeps): express.Express {
       messages: messages.map((m) => ({ id: m.id, role: m.role, body: m.body, createdAt: m.createdAt })),
       attachments: attachments.map((a) => ({ id: a.id, kind: a.kind, mimeType: a.mimeType, sizeBytes: a.sizeBytes })),
       modelMode: c.modelMode,
-      fixtureNotice: c.modelMode !== "live" ? "Development fixture/fallback mode — not a live model result." : null,
+      fixtureNotice: c.modelMode !== "live" ? "Development fixture/fallback mode — not a live model result." : "Live Meta configured. Individual requests may fail; the service team reviews the collected information.",
     });
   });
 
@@ -342,6 +342,15 @@ export function createApp(deps: AppDeps): express.Express {
     if (parsed.data.version !== c.version) {
       return res.status(409).json(errorBody("CASE_VERSION_CONFLICT", "This case changed. Refresh before saving.", rid));
     }
+    if (["submitted", "closed"].includes(c.conversationPhase)) return res.status(409).json(errorBody("VALIDATION_ERROR", "Submitted requests are immutable. Ask staff to record a revision.", rid));
+    if (parsed.data.key === "model_confirmed") return res.status(400).json(errorBody("VALIDATION_ERROR", "Use the identity confirmation control.", rid));
+    await invalidateIdentity(deps.store, tenant.id, c.id, parsed.data.key);
+    if (["brand", "model_number"].includes(parsed.data.key)) c.pendingAction = null;
+    const hazards = screenHazards(String(parsed.data.value ?? ""));
+    if (hazards.length) {
+      const result = await handleHazardTurn({ store: deps.store, provider: deps.provider, storageGet: k => deps.storage.get(k) }, tenant, c, hazards);
+      return res.status(400).json({ ...result, error: { message: result.reply } });
+    }
     const facts = await deps.store.listFacts(tenant.id, c.id);
     const cur = facts.filter((f) => f.key === parsed.data.key && f.status !== "superseded").pop();
     if (cur) await deps.store.markFactSuperseded(tenant.id, cur.id);
@@ -362,12 +371,17 @@ export function createApp(deps: AppDeps): express.Express {
   app.post("/api/v1/cases/:caseId/confirm-model", caseAuth, async (req, res) => {
     const rid = requestId();
     const { tenant, session } = getCtx(req);
-    const schema = z.object({ confirm: z.boolean(), correctedModel: z.string().max(120).nullish() });
+    const schema = z.object({ confirm: z.boolean(), correctedModel: z.string().max(120).nullish(), brand: z.string().max(80).optional(), serialNumber: z.string().max(120).optional() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "confirm (boolean) required.", rid));
     const engine = { store: deps.store, provider: deps.provider, storageGet: (k: string) => deps.storage.get(k) };
+    const hazards = screenHazards([parsed.data.correctedModel, parsed.data.brand, parsed.data.serialNumber].filter(Boolean).join(" "));
+    if (hazards.length) {
+      const c = await deps.store.getCase(tenant.id, session.caseId);
+      if (c) { const result = await handleHazardTurn(engine, tenant, c, hazards); return res.status(400).json({ ...result, error: { message: result.reply } }); }
+    }
     const result = await confirmModelExplicit(engine, tenant, session.caseId, {
-      confirm: parsed.data.confirm, correctedModel: parsed.data.correctedModel ?? undefined,
+      confirm: parsed.data.confirm, correctedModel: parsed.data.correctedModel ?? undefined, brand: parsed.data.brand, serialNumber: parsed.data.serialNumber,
     });
     if (!result.confirmed && parsed.data.confirm) {
       return res.status(400).json(errorBody("VALIDATION_ERROR", "No pending model confirmation, or the corrected value is not a valid model number.", rid));

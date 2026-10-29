@@ -76,15 +76,17 @@ Implement deletion as a scheduled job before live customer use (pilot TODO).
 
 ## Cost controls
 
-Current enforcement status: the application bounds context (recent messages,
-max 4 retrieved chunks, photo results reused) but does NOT enforce any
-spending limit and does NOT record token usage. There is no per-case,
-per-tenant, or global spend guard in this release.
+The Meta adapter bounds serialized request size and output tokens, serializes calls
+through a shared local ledger lock, enforces a lifetime global cap (default $2),
+a per-case estimate/call cap, and a global rate limit. Configure the same
+`META_USAGE_LEDGER` path for web and worker; Compose uses the shared private
+media volume. Unknown usage (including crashes/timeouts) blocks subsequent calls.
+A stale lock must be reconciled manually; do not automatically remove it while a
+request may still be billable. Records contain identifiers and usage, no prompts,
+images or credentials. Keep the ledger private and back it up with media.
 
-- Do not expose live-model traffic publicly without an external budget
-  control (provider-side cap or a proxying budget guard).
-- The illustrative 50k-in/5k-out case (~$0.084 at $1.25/$4.25 per M tokens)
-  is an estimate only. Measure real usage before quoting costs, and recheck
-  Meta pricing before launch.
-- `GLOBAL_AI_SPEND_LIMIT` in earlier templates is reserved for the future
-  spend guard; setting it currently has no effect.
+These are estimated local controls, not provider billing enforcement or a
+distributed multi-host budget. Use a provider-side cap before public traffic.
+Live image billing must be reviewed and enabled explicitly. The local image
+input byte ceiling may reject large photos; manual identity entry remains usable.
+See [benchmark method](benchmark-method.md) for price provenance and limitations.

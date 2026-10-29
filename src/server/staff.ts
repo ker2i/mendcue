@@ -152,6 +152,33 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     res.json({ ok: true, version: c.version });
   });
 
+  // Append-only technician review; submitted snapshots remain unchanged.
+  app.post("/api/v1/staff/cases/:caseId/review", staffAuth, requireMutate, async (req, res) => {
+    const { staffTenant, staffSession } = ctx(req);
+    const parsed = z.object({
+      version: z.number().int(),
+      disposition: z.enum(["ready_to_contact", "need_information", "urgent_review"]),
+      revisedBrief: z.string().min(1).max(12000).optional(),
+      missingFacts: z.array(z.string().max(300)).max(30),
+      unsupportedAssertions: z.array(z.string().max(500)).max(30),
+      unnecessaryQuestionIds: z.array(z.string().max(80)).max(30).default([]),
+      reviewSeconds: z.number().nonnegative().max(86400).nullable(),
+      timingMethod: z.enum(["manual", "measured", "estimated", "not_recorded"]),
+      note: z.string().max(2000).optional(),
+    }).safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "Invalid technician review.", requestId()));
+    const c = await deps.store.getCase(staffTenant.id, req.params.caseId);
+    if (!c) return res.status(404).json(errorBody("NOT_FOUND", "Case not found.", requestId()));
+    if (parsed.data.version !== c.version) return res.status(409).json(errorBody("CASE_VERSION_CONFLICT", "Refresh before reviewing.", requestId()));
+    if (c.conversationPhase !== "submitted") return res.status(409).json(errorBody("VALIDATION_ERROR", "Review a submitted brief.", requestId()));
+    const events = await deps.store.listEvents(staffTenant.id, c.id);
+    const event = { id: randomUUID(), tenantId: staffTenant.id, caseId: c.id, type: "technician_review",
+      payload: { ...parsed.data, revision: events.filter(e => e.type === "technician_review").length + 1,
+        recordedBy: staffSession.userId, approved: parsed.data.disposition === "ready_to_contact" }, createdAt: new Date().toISOString() };
+    await deps.store.addEvent(event);
+    res.status(201).json({ review: event });
+  });
+
   app.post("/api/v1/staff/cases/:caseId/outcome", staffAuth, requireMutate, async (req, res) => {
     const rid = requestId();
     const { staffTenant, staffSession } = ctx(req);

@@ -4,6 +4,7 @@ export interface KnowledgeDocument {
   tenantId: string | null; // null = shared
   visibility: "shared" | "tenant_private";
   publisher: string;
+  usageBasis?: string;
   sourceUrl: string | null;
   documentType: string;
   title: string;
@@ -30,84 +31,61 @@ export interface KnowledgeChunk {
   applicability: { models: string[]; families: string[]; categories: string[] };
 }
 
-export type KnowledgeLevel = "exact_model" | "category_family" | "unknown";
+export type KnowledgeLevel = "exact_model" | "verified_family" | "category_only" | "unknown";
 
-export interface RetrievalHit {
-  chunk: KnowledgeChunk;
-  level: KnowledgeLevel;
-  basis: string;
+export interface EvidenceReference {
+  documentId: string; documentVersion: string; documentHash: string;
+  title: string; sourceUrl: string | null; pdfPageIndex: number | null;
+  printedPageLabel: string | null; chunkId: string; excerpt: string;
+  applicabilityBasis: string;
 }
-
+export interface RetrievalHit { chunk: KnowledgeChunk; level: KnowledgeLevel; basis: string }
 export function normalizeModel(raw: string): string {
   return raw.trim().toUpperCase().replace(/[\s_]+/g, "");
 }
+const brandKey = (raw: string) => raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-// Retrieval order: exact model -> verified family -> brand/category -> generic playbook.
-// Fuzzy text match NEVER establishes model applicability.
+// Family identifiers are reviewed membership sets, never inferred prefixes.
+// explicitFamilies and chunk families contain the same opaque family ID;
+// explicitModels lists every reviewed member of that family.
 export function retrieveKnowledge(args: {
-  chunks: KnowledgeChunk[];
-  documents: Map<string, KnowledgeDocument>;
-  tenantId: string;
-  modelNormalized: string | null;
-  brand: string | null;
-  category: string | null;
-  query: string;
-  limit?: number;
+  chunks: KnowledgeChunk[]; documents: Map<string, KnowledgeDocument>;
+  tenantId: string; modelNormalized: string | null; brand: string | null;
+  category: string | null; query: string; limit?: number;
 }): RetrievalHit[] {
-  const limit = args.limit ?? 4;
-  const usable = args.chunks.filter((c) => {
-    const doc = args.documents.get(c.documentId);
-    if (!doc || doc.reviewStatus !== "approved") return false;
-    if (c.visibility === "tenant_private" && c.tenantId !== args.tenantId) return false;
-    if (doc.visibility === "tenant_private" && doc.tenantId !== args.tenantId) return false;
-    return true;
-  });
-
-  const hits: RetrievalHit[] = [];
-  const q = args.query.toLowerCase();
-
-  // 1. Exact model
-  if (args.modelNormalized) {
-    for (const c of usable) {
-      if (c.applicability.models.map(normalizeModel).includes(args.modelNormalized)) {
-        hits.push({ chunk: c, level: "exact_model", basis: `exact model ${args.modelNormalized}` });
-      }
+  const hits: Array<RetrievalHit & { score: number }> = [];
+  const model = args.modelNormalized ? normalizeModel(args.modelNormalized) : null;
+  for (const c of args.chunks) {
+    const d = args.documents.get(c.documentId);
+    if (!d || d.reviewStatus !== "approved" || c.version !== d.version) continue;
+    if (d.visibility !== c.visibility || d.tenantId !== c.tenantId) continue;
+    if (d.visibility === "tenant_private" && d.tenantId !== args.tenantId) continue;
+    const brandMatches = !!d.brand && !!args.brand && brandKey(d.brand) === brandKey(args.brand);
+    const member = !!model && d.explicitModels.map(normalizeModel).includes(model);
+    let level: KnowledgeLevel, basis: string;
+    if (brandMatches && member && c.applicability.models.map(normalizeModel).includes(model!)) {
+      level = "exact_model"; basis = `Reviewed ${d.brand} model ${model}`;
+    } else if (brandMatches && member && c.applicability.families.some(f => d.explicitFamilies.includes(f))) {
+      level = "verified_family"; basis = `Reviewed family membership for ${d.brand} ${model}`;
+    } else {
+      // A restricted manual/section must never fall through to category retrieval.
+      if (d.explicitModels.length || d.explicitFamilies.length || c.applicability.models.length || c.applicability.families.length) continue;
+      if (d.brand && !brandMatches) continue;
+      if (!(args.category && c.applicability.categories.includes(args.category)) && !c.applicability.categories.includes("general")) continue;
+      level = "category_only"; basis = "Generic category guidance; no model applicability established";
     }
-    if (hits.length >= limit) return hits.slice(0, limit);
+    const tokens = args.query.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 2);
+    const overlap = tokens.filter(t => c.text.toLowerCase().includes(t)).length;
+    hits.push({ chunk: c, level, basis, score: ({ exact_model: 3000, verified_family: 2000, category_only: 1000, unknown: 0 })[level] + overlap });
   }
-  // 2. Verified family (explicit prefix match on normalized model)
-  if (args.modelNormalized) {
-    for (const c of usable) {
-      if (hits.some((h) => h.chunk.id === c.id)) continue;
-      const fam = c.applicability.families.map(normalizeModel);
-      if (fam.some((f) => f && args.modelNormalized!.startsWith(f))) {
-        hits.push({ chunk: c, level: "category_family", basis: "verified model family" });
-      }
-    }
-    if (hits.length >= limit) return hits.slice(0, limit);
-  }
-  // 3/4. Brand/category + generic playbook, ranked by token overlap.
-  const scored: Array<{ c: KnowledgeChunk; score: number; level: KnowledgeLevel }> = [];
-  for (const c of usable) {
-    if (hits.some((h) => h.chunk.id === c.id)) continue;
-    const doc = args.documents.get(c.documentId)!;
-    let eligible = false;
-    if (args.brand && doc.brand && doc.brand.toLowerCase() === args.brand.toLowerCase()) eligible = true;
-    if (args.category && c.applicability.categories.includes(args.category)) eligible = true;
-    if (c.applicability.categories.includes("general")) eligible = true;
-    if (!eligible) continue;
-    const text = c.text.toLowerCase();
-    const tokens = q.split(/[^a-z0-9]+/).filter((t) => t.length > 2);
-    let score = 0;
-    for (const t of tokens) if (text.includes(t)) score++;
-    scored.push({ c, score, level: "category_family" });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  for (const s of scored) {
-    if (hits.length >= limit) break;
-    hits.push({ chunk: s.c, level: s.level, basis: "brand/category playbook" });
-  }
-  return hits.slice(0, limit);
+  return hits.sort((a,b) => b.score - a.score).slice(0, args.limit ?? 4).map(({ score, ...hit }) => hit);
+}
+export function evidenceReference(hit: RetrievalHit, documents: Map<string, KnowledgeDocument>): EvidenceReference {
+  const d = documents.get(hit.chunk.documentId)!;
+  return { documentId: d.id, documentVersion: d.version, documentHash: d.hash,
+    title: d.title, sourceUrl: d.sourceUrl, pdfPageIndex: hit.chunk.pageIndex,
+    printedPageLabel: hit.chunk.pageLabel, chunkId: hit.chunk.id,
+    excerpt: hit.chunk.text, applicabilityBasis: hit.basis };
 }
 
 // Validate that citations reference supplied chunks.

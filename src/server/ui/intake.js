@@ -115,6 +115,11 @@
   function render(resumed) {
     var st = S.state;
     if (!st) return;
+    var warning = document.getElementById("safetyBanner");
+    if (!warning) { warning = el("div", null, "safety-banner"); warning.id = "safetyBanner"; warning.setAttribute("role", "alert"); els.log.parentNode.insertBefore(warning, els.log); }
+    var urgent = ["emergency", "stop_use", "needs_review"].includes(st.case.safetyStatus);
+    warning.hidden = !urgent;
+    warning.textContent = st.case.safetyStatus === "emergency" ? "Emergency reported. Leave the area, avoid switches and flames, and contact emergency services and your gas utility from a safe location. This request is not emergency assistance." : urgent ? "Safety concern reported. Stop using the appliance. A person must review this request; do not attempt additional checks." : "";
     stepsFor(st);
     renderDetails(st);
     if (resumed) {
@@ -132,15 +137,32 @@
   function renderCard(st) {
     clear(els.cardBox);
     var p = st.case.pendingAction;
-    if (!p || p.kind !== "model_confirm") return;
+    var current = {};
+    (st.facts || []).forEach(function(f) { current[f.key] = f.value; });
+    if (!p && !current.model_number && !current.model_number_raw && !current.appliance_category) return;
+    if (st.case.conversationPhase === "submitted") return;
     var card = el("div", null, "label-card");
-    card.appendChild(el("div", "Confirm the model number from your label photo:"));
-    var input = document.createElement("input");
-    input.type = "text"; input.value = p.modelRaw || ""; input.setAttribute("aria-label", "Model number");
-    card.appendChild(input);
+    card.appendChild(el("h3", current.model_confirmed ? "Confirmed by you" : "Please confirm appliance identity"));
+    card.appendChild(el("p", "This confirms the label transcription. The service team will verify the appliance and documentation.", "muted"));
+    var identityPhoto = p && p.attachmentId;
+    if (!identityPhoto) (st.facts || []).forEach(function(f) { if (["model_number", "model_number_raw"].includes(f.key) && f.sourceAttachmentId) identityPhoto = f.sourceAttachmentId; });
+    if (identityPhoto) {
+      var photo = el("img", null, "thumb"); photo.alt = "Uploaded appliance label";
+      card.appendChild(photo);
+      api("/api/v1/cases/" + S.caseId + "/attachments/" + identityPhoto).then(function(r) { return r.blob(); }).then(function(blob) {
+        var url = URL.createObjectURL(blob); photo.onload = function() { URL.revokeObjectURL(url); }; photo.src = url;
+      }).catch(function() { photo.alt = "Label preview unavailable; the saved fields remain editable."; });
+    }
+    function field(label, value) {
+      var wrap = el("label", label); var f = document.createElement("input");
+      f.type = "text"; f.value = value || ""; wrap.appendChild(f); card.appendChild(wrap); return f;
+    }
+    var brand = field("Brand as printed", current.brand);
+    var input = field("Model number", (p && p.modelRaw) || current.model_number_raw || current.model_number);
+    var serial = field("Serial number (optional)", current.serial_number);
     var row = el("div", null, "quick");
     var yes = el("button", "Confirm");
-    yes.onclick = function () { confirmModel(true, input.value); };
+    yes.onclick = function () { confirmModel(true, input.value, brand.value, serial.value); };
     var no = el("button", "Not correct");
     no.onclick = function () { confirmModel(false, null); };
     row.appendChild(yes); row.appendChild(no);
@@ -148,9 +170,9 @@
     els.cardBox.appendChild(card);
   }
 
-  function confirmModel(confirm, corrected) {
+  function confirmModel(confirm, corrected, brand, serial) {
     setStatus("Confirming…");
-    var body = { confirm: confirm };
+    var body = { confirm: confirm, brand: brand, serialNumber: serial };
     if (corrected) body.correctedModel = corrected;
     api("/api/v1/cases/" + S.caseId + "/confirm-model", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -181,7 +203,7 @@
             r2.appendChild(val);
             var edit = el("button", "Edit", "btn rev-edit");
             edit.onclick = function () { editRow(rev, row, r2); };
-            r2.appendChild(edit);
+            if (row.editable) r2.appendChild(edit);
             box.appendChild(r2);
           });
           els.reviewBody.appendChild(box);
@@ -267,7 +289,12 @@
       if (!st) return null;
       S.state = st;
       render(false);
-      stepsFor(st); renderDetails(st); quickReplies(); renderCard(st);
+      var warning = document.getElementById("safetyBanner");
+    if (!warning) { warning = el("div", null, "safety-banner"); warning.id = "safetyBanner"; warning.setAttribute("role", "alert"); els.log.parentNode.insertBefore(warning, els.log); }
+    var urgent = ["emergency", "stop_use", "needs_review"].includes(st.case.safetyStatus);
+    warning.hidden = !urgent;
+    warning.textContent = st.case.safetyStatus === "emergency" ? "Emergency reported. Leave the area, avoid switches and flames, and contact emergency services and your gas utility from a safe location. This request is not emergency assistance." : urgent ? "Safety concern reported. Stop using the appliance. A person must review this request; do not attempt additional checks." : "";
+    stepsFor(st); renderDetails(st); quickReplies(); renderCard(st);
       return st;
     });
   }

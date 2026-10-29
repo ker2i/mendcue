@@ -141,7 +141,7 @@ export interface AssessmentInput {
   caseId: string;
   facts: Array<{ id: string; key: string; value: unknown }>;
   chunks: Array<{ id: string; documentId: string; page: string | null; text: string }>;
-  knowledgeLevel: "exact_model" | "category_family" | "unknown";
+  knowledgeLevel: "exact_model" | "verified_family" | "category_only" | "unknown";
 }
 
 export interface AssessmentResult {

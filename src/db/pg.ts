@@ -182,6 +182,9 @@ export class PgStore implements Store {
     return x ? { id: String(x.id), tenantId: String(x.tenant_id), caseId: String(x.case_id), tokenHash: String(x.token_hash), bootstrapCodeHash: null, bootstrapUsed: true, createdAt: iso(x.created_at), expiresAt: iso(x.expires_at) } : null;
   }
 
+  async clearAssessment(tenantId: string, caseId: string) {
+    await this.tenant(tenantId, q => q("DELETE FROM assessments WHERE tenant_id=$1 AND case_id=$2", [tenantId, caseId]));
+  }
   async saveAssessment(a: Assessment) {
     await this.tenant(a.tenantId, async (q) => {
       await q("INSERT INTO assessments(id, tenant_id, case_id, status, hypotheses, recommended_follow_up, knowledge_level, citations) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id, case_id) DO UPDATE SET status=EXCLUDED.status, hypotheses=EXCLUDED.hypotheses, recommended_follow_up=EXCLUDED.recommended_follow_up, knowledge_level=EXCLUDED.knowledge_level, citations=EXCLUDED.citations",
@@ -220,8 +223,8 @@ export class PgStore implements Store {
 
   async saveDocument(d: KnowledgeDocument) {
     await this.tenant(d.tenantId ?? "", async (q) => {
-      await q("INSERT INTO knowledge_documents(id, tenant_id, visibility, publisher, source_url, document_type, title, language, brand, explicit_models, explicit_families, hash, version, review_status, reviewed_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING",
-        [d.id, d.tenantId, d.visibility, d.publisher, d.sourceUrl, d.documentType, d.title, d.language, d.brand, JSON.stringify(d.explicitModels), JSON.stringify(d.explicitFamilies), d.hash, d.version, d.reviewStatus, d.reviewedBy]);
+      await q("INSERT INTO knowledge_documents(id, tenant_id, visibility, publisher, source_url, document_type, title, language, brand, explicit_models, explicit_families, hash, version, review_status, reviewed_by, usage_basis) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(id) DO NOTHING",
+        [d.id, d.tenantId, d.visibility, d.publisher, d.sourceUrl, d.documentType, d.title, d.language, d.brand, JSON.stringify(d.explicitModels), JSON.stringify(d.explicitFamilies), d.hash, d.version, d.reviewStatus, d.reviewedBy, d.usageBasis ?? null]);
     });
   }
   async saveChunk(c: KnowledgeChunk) {
@@ -243,7 +246,7 @@ export class PgStore implements Store {
     });
   }
   private docFrom(x: Record<string, unknown>): KnowledgeDocument {
-    return { id: String(x.id), tenantId: x.tenant_id ? String(x.tenant_id) : null, visibility: x.visibility as KnowledgeDocument["visibility"], publisher: String(x.publisher), sourceUrl: x.source_url ? String(x.source_url) : null, documentType: String(x.document_type), title: String(x.title), language: String(x.language), brand: x.brand ? String(x.brand) : null, explicitModels: (x.explicit_models as string[]) ?? [], explicitFamilies: (x.explicit_families as string[]) ?? [], retrievedAt: iso(x.retrieved_at), hash: String(x.hash), version: String(x.version), reviewStatus: x.review_status as KnowledgeDocument["reviewStatus"], reviewedBy: x.reviewed_by ? String(x.reviewed_by) : null };
+    return { id: String(x.id), tenantId: x.tenant_id ? String(x.tenant_id) : null, visibility: x.visibility as KnowledgeDocument["visibility"], publisher: String(x.publisher), usageBasis: x.usage_basis ? String(x.usage_basis) : undefined, sourceUrl: x.source_url ? String(x.source_url) : null, documentType: String(x.document_type), title: String(x.title), language: String(x.language), brand: x.brand ? String(x.brand) : null, explicitModels: (x.explicit_models as string[]) ?? [], explicitFamilies: (x.explicit_families as string[]) ?? [], retrievedAt: iso(x.retrieved_at), hash: String(x.hash), version: String(x.version), reviewStatus: x.review_status as KnowledgeDocument["reviewStatus"], reviewedBy: x.reviewed_by ? String(x.reviewed_by) : null };
   }
 
   async enqueueJob(j: JobRecord) {

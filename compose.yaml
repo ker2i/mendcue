@@ -48,6 +48,7 @@ services:
     environment:
       DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:-change_me_in_production}@postgres:5432/intake
       PORT: "3000"
+      META_USAGE_LEDGER: /data/media/meta-usage.json
     volumes:
       - mediadata:/data/media
     networks: [private, public]
@@ -67,6 +68,7 @@ services:
     environment:
       DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:-change_me_in_production}@postgres:5432/intake
       SYNC_TURNS: "0"
+      META_USAGE_LEDGER: /data/media/meta-usage.json
     volumes:
       - mediadata:/data/media
     networks: [private]

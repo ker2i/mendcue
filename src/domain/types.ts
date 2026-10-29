@@ -148,8 +148,8 @@ export interface Assessment {
   status: "ok" | "assessment_unavailable";
   hypotheses: Hypothesis[];
   recommendedFollowUp: string;
-  knowledgeLevel: "exact_model" | "category_family" | "unknown";
-  citations: Array<{ chunkId: string; documentId: string; page: string | null; quote: string }>;
+  knowledgeLevel: "exact_model" | "verified_family" | "category_only" | "unknown";
+  citations: Array<import("./knowledge.js").EvidenceReference & { page: string | null; quote: string }>;
   createdAt: string;
 }
 

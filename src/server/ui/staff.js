@@ -33,6 +33,7 @@
         appBox.style.display = "block";
         document.getElementById("who").textContent = o.j.user.name + " (" + o.j.user.role + ") — " + o.j.tenant;
         loadInbox();
+        if (location.hash.startsWith("#case=")) openCase(decodeURIComponent(location.hash.slice(6)));
       });
   }
 
@@ -74,18 +75,20 @@
       b.appendChild(strong);
       b.appendChild(document.createTextNode(
         (c.appliance || "?") + " — " + ((c.complaint || "").slice(0, 90)) +
-        "  |  " + (c.zip || "?") + "  |  " + c.safetyStatus + "  |  " + c.workflowStatus +
-        (c.disposition !== "pending" ? "  |  " + c.disposition : "")
+        "  |  " + (c.zip || "?") + "  |  " + readable(c.safetyStatus) + "  |  " + readable(c.workflowStatus) +
+        (c.disposition !== "pending" ? "  |  " + readable(c.disposition) : "")
       ));
       b.onclick = function () { openCase(c.id); };
       box.appendChild(b);
     });
   }
 
+  function readable(value) { return String(value || "Unknown").replace(/_/g, " "); }
   function flag(text, danger) { return el("span", text, danger ? "flag flag-danger" : "flag"); }
 
   function openCase(id) {
     S.openId = id;
+    history.replaceState(null, "", "#case=" + encodeURIComponent(id));
     fetch("/api/v1/staff/cases/" + id).then(function (r) { return r.json(); }).then(function (j) {
       S.detail = j;
       renderDetail(j);
@@ -98,14 +101,21 @@
     var c = j.case;
     d.appendChild(el("h2", c.reference + " (v" + c.version + ")"));
     var flags = el("div", null, "flags");
-    flags.appendChild(flag("safety: " + c.safetyStatus, c.safetyStatus === "emergency" || c.safetyStatus === "stop_use"));
-    flags.appendChild(flag("workflow: " + c.workflowStatus, false));
-    flags.appendChild(flag("disposition: " + c.disposition, c.disposition === "human_requested"));
-    flags.appendChild(flag("phase: " + c.conversationPhase, false));
+    flags.appendChild(flag("safety: " + readable(c.safetyStatus), c.safetyStatus === "emergency" || c.safetyStatus === "stop_use"));
+    flags.appendChild(flag("workflow: " + readable(c.workflowStatus), false));
+    flags.appendChild(flag("disposition: " + readable(c.disposition), c.disposition === "human_requested"));
+    flags.appendChild(flag("phase: " + readable(c.conversationPhase), false));
     d.appendChild(flags);
 
     var h = (j.handoffs || [])[(j.handoffs || []).length - 1];
     var snap = h ? h.snapshot : null;
+    var staffReviews = (j.events || []).filter(function(e) { return e.type === "technician_review"; });
+    var staffRevision = staffReviews[staffReviews.length - 1];
+    if (staffRevision && staffRevision.payload.revisedBrief) {
+      var revision = el("section", null, "card"); revision.appendChild(el("h3", staffRevision.payload.approved ? "Technician-approved brief" : "Technician revision — further review required"));
+      revision.appendChild(el("p", staffRevision.payload.revisedBrief));
+      revision.appendChild(el("p", "Recorded " + staffRevision.createdAt + ". Original submitted evidence is retained below.", "muted")); d.appendChild(revision);
+    }
     var brief = el("div", null, "card");
     brief.appendChild(el("h3", "Technician brief" + (h ? " (handoff v" + h.version + ")" : " — not submitted yet")));
     if (!snap) {
@@ -122,6 +132,7 @@
       var ap = snap.appliance || {};
       row("Appliance", (ap.category || "?") + " / " + (ap.brand || "?") + " / " + (ap.model || "?") +
         (ap.model_confirmed ? " (identification confirmed)" : " (identification unconfirmed)"), "Reported by customer");
+      row("Documentation", ({ exact_model: "Exact model", verified_family: "Verified family", category_only: "Category guidance only", category_family: "Legacy category/family (unverified)", unknown: "No applicable documentation" })[snap.knowledge_level] || "Unknown", null);
       row("Complaint", String(snap.complaint || "—"), "Reported by customer");
       row("Safety", "status " + ((snap.safety || {}).status || "?") + ", disposition " + ((snap.safety || {}).disposition || "?"), null);
       row("Contact", String((snap.contact || {}).name || "—") + " — " + String((snap.contact || {}).channel || "—") +
@@ -129,7 +140,7 @@
       var facts = (snap.facts || []).filter(function (f) {
         return ["failure_stage", "drain_observation", "error_code", "display_reading", "cooling_scope", "sound_observation", "leak_observation", "load_observation"].includes(f.key);
       });
-      row("Key observations", facts.length ? facts.map(function (f) { return f.key + ": " + f.value; }).join("; ") : "—", "Reported by customer");
+      row("Key observations", facts.length ? facts.map(function (f) { return ({ failure_stage: "When it happens", drain_observation: "Standing water", error_code: "Exact error text", display_reading: "Display", cooling_scope: "Affected compartments", sound_observation: "Sounds", leak_observation: "Leaks or ice", load_observation: "Load size" }[f.key] || f.key) + ": " + f.value; }).join("; ") : "—", "Reported by customer");
       var hyps = snap.hypotheses || [];
       row("Preliminary issue areas", hyps.length
         ? hyps.map(function (x) { return x.issueArea + " [" + x.priority + ", " + x.evidenceStrength + " support]"; }).join("  •  ")
@@ -143,6 +154,33 @@
     }
     if (!snap) d.appendChild(brief);
 
+    if (snap) {
+      var panel = el("section", null, "card review-panel"); panel.appendChild(el("h3", "Technician decision"));
+      var reviews = (j.events || []).filter(function(e) { return e.type === "technician_review"; });
+      var latest = reviews[reviews.length - 1];
+      panel.appendChild(el("p", latest ? (latest.payload.approved ? "Technician approved" : "Human follow-up required") : "AI draft — awaiting technician review", "flag"));
+      var edits = document.createElement("details"); edits.appendChild(el("summary", "Corrections, missing facts and review time")); panel.appendChild(edits);
+      function control(label, tag) { var l = el("label", label); var input = document.createElement(tag); l.appendChild(input); edits.appendChild(l); return input; }
+      var revised = control("Edit brief (optional)", "textarea"); revised.rows = 5;
+      revised.value = latest && latest.payload.revisedBrief || "";
+      var missing = control("Missing facts (one per line)", "textarea");
+      var unsupported = control("Incorrect or unsupported assertions (one per line)", "textarea");
+      var seconds = control("Active review time in seconds (optional, manually recorded)", "input"); seconds.type = "number"; seconds.min = "0";
+      var note = control("Feedback note", "textarea");
+      var status = el("p", ""); status.setAttribute("role", "status");
+      [["ready_to_contact", "Ready to contact / plan visit"], ["need_information", "Need more information"], ["urgent_review", "Needs urgent human review"]].forEach(function(pair) {
+        var b = el("button", pair[1], "btn"); b.disabled = S.user && S.user.role === "readonly";
+        b.onclick = function() {
+          b.disabled = true;
+          function lines(value) { return value.split("\n").map(function(s) { return s.trim(); }).filter(Boolean); }
+          fetch("/api/v1/staff/cases/" + c.id + "/review", { method: "POST", headers: csrf(), body: JSON.stringify({
+            version: c.version, disposition: pair[0], revisedBrief: revised.value || undefined,
+            missingFacts: lines(missing.value), unsupportedAssertions: lines(unsupported.value),
+            reviewSeconds: seconds.value === "" ? null : Number(seconds.value), timingMethod: seconds.value === "" ? "not_recorded" : "manual", note: note.value
+          }) }).then(function(r) { if (!r.ok) throw new Error("Save failed; refresh and retry."); openCase(c.id); }).catch(function(e) { status.textContent = e.message; b.disabled = false; });
+        }; panel.appendChild(b);
+      }); panel.appendChild(status); d.appendChild(panel);
+    }
     // Photos.
     var photos = el("div", null, "card");
     photos.appendChild(el("h3", "Photos (" + (j.attachments || []).length + ")"));
@@ -153,7 +191,7 @@
       img.className = "thumb";
       img.alt = a.kind + " photo";
       img.src = "/api/v1/staff/cases/" + c.id + "/attachments/" + a.id;
-      wrap.appendChild(img);
+      var link = document.createElement("a"); link.href = img.src; link.target = "_blank"; link.rel = "noopener"; link.appendChild(img); wrap.appendChild(link);
       wrap.appendChild(el("div", a.kind + " — " + a.mimeType, "muted"));
       photos.appendChild(wrap);
     });
@@ -164,7 +202,11 @@
       var src = el("div", null, "card");
       src.appendChild(el("h3", "Cited sources (" + snap.citations.length + ")"));
       snap.citations.forEach(function (ct) {
-        src.appendChild(el("p", ct.documentId + " v? p." + (ct.page || "?") + ": " + (ct.quote || "").slice(0, 200)));
+        src.appendChild(el("p", (ct.title || ct.documentId) + " · " + (ct.documentVersion || "legacy version unavailable") + " · PDF page " + (ct.pdfPageIndex == null ? "unknown" : ct.pdfPageIndex + 1) + " · printed " + (ct.printedPageLabel || ct.page || "unknown") + " · " + (ct.applicabilityBasis || "legacy applicability unavailable")));
+        var excerpt = document.createElement("details"); excerpt.appendChild(el("summary", "Open source excerpt"));
+        excerpt.appendChild(el("blockquote", ct.excerpt || ct.quote || "Unavailable"));
+        excerpt.appendChild(el("p", "Document hash: " + (ct.documentHash || "unavailable"), "muted"));
+        src.appendChild(excerpt);
       });
       d.appendChild(src);
     }
@@ -246,7 +288,8 @@
         }),
       }).then(function (r) { return r.json(); }).then(function (x) {
         alert(x.ok ? "Updated." : ((x.error && x.error.message) || "Update failed."));
-        loadInbox(); openCase(c.id);
+        loadInbox();
+        if (location.hash.startsWith("#case=")) openCase(decodeURIComponent(location.hash.slice(6))); openCase(c.id);
       });
     };
     st.appendChild(ub);

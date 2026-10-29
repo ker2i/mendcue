@@ -129,7 +129,7 @@ paths:
         '200': { description: Sections, missing fields, ack requirement }
   /cases/{caseId}/confirm-model:
     post:
-      summary: Explicit label confirmation from the confirmation card
+      summary: Confirm photo transcription or manually supplied appliance identity
       security: [{ caseToken: [] }]
       parameters: [{ $ref: '#/components/parameters/CaseId' }]
       requestBody:
@@ -141,7 +141,9 @@ paths:
               required: [confirm]
               properties:
                 confirm: { type: boolean }
-                correctedModel: { type: string }
+                correctedModel: { type: string, maxLength: 120 }
+                brand: { type: string, maxLength: 80 }
+                serialNumber: { type: string, maxLength: 120 }
       responses:
         '200': { description: Confirmation result }
         '400': { description: Nothing pending or invalid value }
@@ -214,6 +216,32 @@ paths:
       summary: Tenant settings, webhooks, credentials, knowledge coverage
       responses:
         '200': { description: Sanitized settings (no secrets) }
+  /staff/cases/{caseId}/review:
+    post:
+      summary: Append technician decision and brief correction (staff cookie, CSRF, mutable role)
+      description: Preserves submitted snapshots. Decision is independent of workflow status. Review history is returned in staff case events.
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, disposition, missingFacts, unsupportedAssertions, reviewSeconds, timingMethod]
+              properties:
+                version: { type: integer }
+                disposition: { type: string, enum: [ready_to_contact, need_information, urgent_review] }
+                revisedBrief: { type: string, maxLength: 12000 }
+                missingFacts: { type: array, items: { type: string } }
+                unsupportedAssertions: { type: array, items: { type: string } }
+                unnecessaryQuestionIds: { type: array, items: { type: string } }
+                reviewSeconds: { type: number, nullable: true, minimum: 0 }
+                timingMethod: { type: string, enum: [manual, measured, estimated, not_recorded] }
+                note: { type: string }
+      responses:
+        '201': { description: Append-only review event }
+        '403': { description: Read-only role or CSRF failure }
+        '409': { description: Version changed or request not submitted }
   /staff/cases/{caseId}/outcome:
     post:
       summary: Record repair outcome

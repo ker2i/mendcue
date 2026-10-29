@@ -4,8 +4,9 @@ import type { Assessment, CaseFact, CaseRecord, Message, PendingAction, TenantCo
 import type { HazardHit } from "./safety.js";
 import { detectConflicts, isAllowedKey, isUnknownValue, normalizeFact } from "./facts.js";
 import { containsForbiddenAction, gasLeakScript, generalHazardScript, screenHazards } from "./safety.js";
-import { findAction, findQuestion, nextQuestion } from "./questions.js";
-import { normalizeModel, retrieveKnowledge, validateCitations } from "./knowledge.js";
+import { findAction, findQuestion, nextQuestion, questionRationale } from "./questions.js";
+import { normalizeModel, evidenceReference, retrieveKnowledge } from "./knowledge.js";
+import { groundedIssueAreas } from "./brief.js";
 import { parseLabelText } from "./labelparse.js";
 import type { ModelProvider } from "../integrations/meta/provider.js";
 import { ModelFailure } from "../integrations/meta/provider.js";
@@ -345,7 +346,7 @@ export async function processTurn(
   }
 
   // 3. Validate + conflict-detect. Never silently choose on contradiction.
-  const valid = proposed.filter((p) => isAllowedKey(p.key));
+  const valid = proposed.filter((p) => isAllowedKey(p.key) && !["model_confirmed", "consent", "service_area_acknowledged"].includes(p.key));
   const conflicts = detectConflicts(facts, valid);
   const factsAdded: string[] = [];
   if (conflicts.length > 0) {
@@ -518,7 +519,7 @@ export async function processTurn(
   await store.updateCase(c);
   await store.addEvent({
     id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "question_asked",
-    payload: { questionId: chosen.id }, createdAt: now,
+    payload: { questionId: chosen.id, version: chosen.version, factKey: chosen.factKey, rationale: questionRationale(chosen.id) }, createdAt: now,
   });
   await persistAssistant(store, tenant.id, c, reply);
   return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded, conflicts, questionId: chosen.id, actionId, modelMode };
@@ -531,6 +532,14 @@ async function persistAssistant(store: Store, tenantId: string, c: CaseRecord, b
   };
   await store.addMessage(m);
   return m;
+}
+
+export async function invalidateIdentity(store: Store, tenantId: string, caseId: string, key: string): Promise<void> {
+  if (!["brand", "model_number", "model_number_raw"].includes(key)) return;
+  for (const f of await store.listFacts(tenantId, caseId)) {
+    if (f.key === "model_confirmed" && f.status !== "superseded") await store.markFactSuperseded(tenantId, f.id);
+  }
+  await store.clearAssessment(tenantId, caseId);
 }
 
 async function addFact(
@@ -547,6 +556,7 @@ async function addFact(
     createdAt: new Date().toISOString(), supersedesId,
     confirmedBy: null, confirmedAt: null,
   };
+  await invalidateIdentity(store, tenantId, c.id, p.key);
   await store.addFact(f);
   return f;
 }
@@ -559,7 +569,7 @@ export interface LabelOutcome {
   ambiguous: boolean;
 }
 
-const AMBIGUOUS_CHAR = /[O0Il1]/;
+
 
 export async function processLabelPhoto(
   deps: EngineDeps, tenant: TenantConfig, caseId: string, attachmentId: string
@@ -617,15 +627,11 @@ export async function processLabelPhoto(
     if (parsed.serial && !serial) serial = parsed.serial;
     if (parsed.ambiguous) ambiguous = true;
     basis = parsed.basis;
-  } else if (AMBIGUOUS_CHAR.test(modelRaw)) {
-    ambiguous = true;
   }
-  void basis;
 
   const facts = await store.listFacts(tenant.id, caseId);
   const current = latestFacts(facts);
   if (modelRaw) {
-    const norm = normalizeModel(modelRaw);
     if (current.get("model_number_raw")) await store.markFactSuperseded(tenant.id, current.get("model_number_raw")!.id);
     await addFact(store, tenant.id, c, { key: "model_number_raw", value: modelRaw, certainty: "explicit" }, null, attachmentId);
     // Ambiguous characters stay unresolved: do NOT set model_number as exact.
@@ -633,7 +639,6 @@ export async function processLabelPhoto(
       if (current.get("model_number")) await store.markFactSuperseded(tenant.id, current.get("model_number")!.id);
       await addFact(store, tenant.id, c, { key: "model_number", value: modelRaw, certainty: "explicit" }, null, attachmentId);
     }
-    void norm;
   }
   if (brand) {
     if (current.get("brand")) await store.markFactSuperseded(tenant.id, current.get("brand")!.id);
@@ -644,7 +649,7 @@ export async function processLabelPhoto(
   }
   await store.addEvent({
     id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "label_processed",
-    payload: { attachmentId, modelRaw, ambiguous, uncertainty }, createdAt: now,
+    payload: { attachmentId, brand, modelRaw, serial, rawText, basis, ambiguous, uncertainty }, createdAt: now,
   });
   if (modelRaw) {
     c.pendingAction = { kind: "model_confirm", modelRaw, attachmentId };
@@ -671,13 +676,14 @@ export async function processLabelPhoto(
 // must send other replies through the normal message pipeline.
 export async function confirmModelExplicit(
   deps: EngineDeps, tenant: TenantConfig, caseId: string,
-  decision: { confirm: boolean; correctedModel?: string }
+  decision: { confirm: boolean; correctedModel?: string; brand?: string; serialNumber?: string }
 ): Promise<{ confirmed: boolean; model: string | null }> {
   const store = deps.store;
   const c = await store.getCase(tenant.id, caseId);
   if (!c) throw new Error("case not found");
-  const pending = c.pendingAction;
-  if (!pending || pending.kind !== "model_confirm") return { confirmed: false, model: null };
+  if (["submitted", "closed"].includes(c.conversationPhase)) return { confirmed: false, model: null };
+  const pending = c.pendingAction?.kind === "model_confirm" ? c.pendingAction : null;
+  if (!pending && !decision.correctedModel) return { confirmed: false, model: null };
   const facts = await store.listFacts(tenant.id, caseId);
   const current = latestFacts(facts);
   const now = new Date().toISOString();
@@ -688,20 +694,27 @@ export async function confirmModelExplicit(
     await store.updateCase(c);
     return { confirmed: false, model: null };
   }
-  const candidate = (decision.correctedModel ?? pending.modelRaw).trim().slice(0, 120);
-  if (!isModelLikeCorrection(candidate) && candidate !== pending.modelRaw) {
+  const candidate = (decision.correctedModel ?? pending?.modelRaw ?? "").trim().slice(0, 120);
+  if (!isModelLikeCorrection(candidate) && candidate !== pending?.modelRaw) {
     return { confirmed: false, model: null };
   }
   if (current.get("model_number")) await store.markFactSuperseded(tenant.id, current.get("model_number")!.id);
-  await addFact(store, tenant.id, c, { key: "model_number", value: candidate, certainty: "explicit" }, null, pending.attachmentId);
-  await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, null, pending.attachmentId);
+  for (const [key, value] of [["brand", decision.brand], ["serial_number", decision.serialNumber]] as const) {
+    if (value === undefined) continue;
+    if (current.get(key)) await store.markFactSuperseded(tenant.id, current.get(key)!.id);
+    await addFact(store, tenant.id, c, { key, value, certainty: "explicit" }, null, pending?.attachmentId ?? null);
+  }
+  if (current.get("model_number_raw")) await store.markFactSuperseded(tenant.id, current.get("model_number_raw")!.id);
+  await addFact(store, tenant.id, c, { key: "model_number_raw", value: candidate, certainty: "explicit" }, null, pending?.attachmentId ?? null);
+  await addFact(store, tenant.id, c, { key: "model_number", value: candidate, certainty: "explicit" }, null, pending?.attachmentId ?? null);
+  await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, null, pending?.attachmentId ?? null);
   c.pendingAction = null;
   c.version += 1;
   c.updatedAt = now;
   await store.updateCase(c);
   await store.addEvent({
     id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "model_confirmed",
-    payload: { model: candidate, attachmentId: pending.attachmentId }, createdAt: now,
+    payload: { model: candidate, brand: decision.brand ?? current.get("brand")?.value ?? null, attachmentId: pending?.attachmentId ?? null }, createdAt: now,
   });
   return { confirmed: true, model: candidate };
 }
@@ -766,7 +779,7 @@ export function buildReview(tenant: TenantConfig, facts: CaseFact[], phase: stri
       key: r.key, label: r.label,
       value: f ? f.value : null,
       missing: !f || f.value === null,
-      editable: true,
+      editable: r.key !== "model_confirmed",
     });
   }
   const missing = tenant.requiredFields.filter((k) => {
@@ -809,7 +822,8 @@ export async function submitCase(
   // Retrieval for assessment (approved docs only, tenant-isolated).
   const docs = await store.listDocuments(tenant.id);
   const chunks = await store.listChunks(tenant.id);
-  const docMap = new Map(docs.map((d) => [d.id, d]));
+  const activeDocs = deps.provider.mode === "live" ? docs.filter(d => !d.reviewedBy?.startsWith("example-content")) : docs;
+  const docMap = new Map(activeDocs.map((d) => [d.id, d]));
   const modelVal = byKey.get("model_number")?.value;
   const confirmed = byKey.get("model_confirmed")?.value === true;
   const hits = retrieveKnowledge({
@@ -830,18 +844,13 @@ export async function submitCase(
       chunks: hits.map((h) => ({ id: h.chunk.id, documentId: h.chunk.documentId, page: h.chunk.pageLabel, text: h.chunk.text })),
       knowledgeLevel: level,
     });
-    // Validate citations resolve to supplied chunks; drop invalid ones.
-    const supplied = hits;
-    const hyps = ar.hypotheses.slice(0, 3).map((h) => {
-      const v = validateCitations(h.sourceChunkIds.map((id) => ({ chunkId: id })), supplied);
-      return { ...h, sourceChunkIds: h.sourceChunkIds.filter((id) => !v.invalidIds.includes(id)) };
-    });
+    const hyps = groundedIssueAreas(ar, facts);
     assessment = {
       id: randomUUID(), tenantId: tenant.id, caseId: c.id, status: "ok",
       hypotheses: hyps.slice(0, 3),
-      recommendedFollowUp: ar.recommendedFollowUp,
+      recommendedFollowUp: "Review the collected observations and applicable sources, confirm identity, and contact the customer about missing information. Technician diagnosis is required.",
       knowledgeLevel: level,
-      citations: hits.map((h) => ({ chunkId: h.chunk.id, documentId: h.chunk.documentId, page: h.chunk.pageLabel, quote: h.chunk.text.slice(0, 280) })),
+      citations: hits.map((h) => ({ ...evidenceReference(h, docMap), page: h.chunk.pageLabel, quote: h.chunk.text.slice(0, 280) })),
       createdAt: now,
     };
   } catch (e) {
@@ -850,7 +859,7 @@ export async function submitCase(
       id: randomUUID(), tenantId: tenant.id, caseId: c.id, status: "assessment_unavailable",
       hypotheses: [], recommendedFollowUp: "Model assessment unavailable — review collected facts and contact the customer.",
       knowledgeLevel: level,
-      citations: hits.map((h) => ({ chunkId: h.chunk.id, documentId: h.chunk.documentId, page: h.chunk.pageLabel, quote: h.chunk.text.slice(0, 280) })),
+      citations: hits.map((h) => ({ ...evidenceReference(h, docMap), page: h.chunk.pageLabel, quote: h.chunk.text.slice(0, 280) })),
       createdAt: now,
     };
     await store.addEvent({

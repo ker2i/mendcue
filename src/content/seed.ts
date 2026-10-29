@@ -65,8 +65,8 @@ export function demoTenants(): TenantConfig[] {
   return [a, b];
 }
 
-// Small reviewed manual collection. These are technician-approved GENERAL playbook
-// excerpts written for the demo — not manufacturer manuals. Real manuals are added
+// Development example collection. Approval flags enable fixture retrieval only;
+// these excerpts are not technician-approved or manufacturer manuals. Real manuals are added
 // through the documented ingestion flow with source URLs and page citations.
 export function demoDocuments(): KnowledgeDocument[] {
   const base = {
@@ -80,19 +80,19 @@ export function demoDocuments(): KnowledgeDocument[] {
   return [
     {
       id: "doc_washer_general", tenantId: null, visibility: "shared",
-      documentType: "category_playbook", title: "Washer intake playbook (general, approved)",
+      documentType: "category_playbook", title: "Washer intake playbook (example general guidance; pilot review pending)",
       brand: null, explicitModels: [], explicitFamilies: [],
       hash: "demo-washer-v1", version: "v1", ...base,
     },
     {
       id: "doc_fridge_general", tenantId: null, visibility: "shared",
-      documentType: "category_playbook", title: "Refrigerator intake playbook (general, approved)",
+      documentType: "category_playbook", title: "Refrigerator intake playbook (example general guidance; pilot review pending)",
       brand: null, explicitModels: [], explicitFamilies: [],
       hash: "demo-fridge-v1", version: "v1", ...base,
     },
     {
       id: "doc_dw_general", tenantId: null, visibility: "shared",
-      documentType: "category_playbook", title: "Dishwasher intake playbook (general, approved)",
+      documentType: "category_playbook", title: "Dishwasher intake playbook (example general guidance; pilot review pending)",
       brand: null, explicitModels: [], explicitFamilies: [],
       hash: "demo-dw-v1", version: "v1", ...base,
     },

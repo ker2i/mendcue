@@ -88,7 +88,7 @@ async function main() {
   try {
     // ---- A. hosted intake, desktop ----
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
+    await page.setViewport({ width: 1440, height: 900 });
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
     await page.goto(`${BASE}/business/demo-phoenix-appliance`, { waitUntil: "networkidle0" });
@@ -207,6 +207,7 @@ async function main() {
     });
 
     const staff = await browser.newPage();
+    await staff.setViewport({width:1440,height:900});
     await staff.goto(`${BASE}/staff`, { waitUntil: "networkidle0" });
     await staff.type("#slug", "demo-phoenix-appliance");
     await staff.type("#email", "tech@demo-phoenix.invalid");
@@ -234,7 +235,21 @@ async function main() {
     ok("staff photo renders", photoCount === 1, `${photoCount} photos`);
     const photoOk = await staff.$eval("#detail img.thumb", (img) => img.naturalWidth > 0).catch(() => false);
     ok("staff photo bytes load", photoOk === true);
+    const approve = await staff.$$("#detail .review-panel button");
+    ok("technician action panel present", approve.length === 3);
+    await approve[0].click();
+    await sleep(700);
+    ok("technician approval saved", (await staff.$eval("#detail", e => e.innerText)).includes("Technician approved"));
+    ok("stable case navigation", staff.url().includes("#case="));
+    await pageM.setViewport({width:320,height:844});
+    const narrowFrame = await frameOf(pageM);
+    ok("320px intake reflows", await narrowFrame.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await pageM.setViewport({width:390,height:844});
     await page.screenshot({ path: "/tmp/mendcue-hosted.png" });
+    // Capture a normal synthetic case after the separate markup regression.
+    await staff.evaluate(() => { const row = [...document.querySelectorAll("#inbox .inbox-row")].find(e => e.textContent.includes("washer")); if (row) row.click(); });
+    await sleep(700);
+    await staff.evaluate(() => scrollTo(0,0));
     await staff.screenshot({ path: "/tmp/mendcue-staff.png" });
     await pageM.screenshot({ path: "/tmp/mendcue-phone.png" });
 
