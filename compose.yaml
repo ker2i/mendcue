@@ -1,0 +1,95 @@
+name: mendcue
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: intake
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-intake_change_me}
+      POSTGRES_DB: intake
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U intake"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+    networks: [private]
+    command: ["node", "dist/db/migrate.js"]
+
+  seed:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+    networks: [private]
+    command: ["node", "dist/db/seed.js"]
+    profiles: ["seed"]
+
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+      PORT: "3000"
+    volumes:
+      - mediadata:/data/media
+    networks: [private, public]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+      SYNC_TURNS: "0"
+    volumes:
+      - mediadata:/data/media
+    networks: [private]
+    command: ["node", "dist/worker/index.js"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [web]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    networks: [public]
+
+volumes:
+  pgdata:
+  mediadata:
+  caddydata:
+
+networks:
+  public:
+  private:
+    internal: true
