@@ -5,7 +5,7 @@ import type {
   AssessmentInput, AssessmentResult, IntakeTurnInput, IntakeTurnResult,
   LabelInput, LabelResult, ModelProvider,
 } from "./provider.js";
-import { ModelFailure } from "./provider.js";
+import { ModelFailure, parseAssessmentResult, parseLabelResult, parseTurnResult } from "./provider.js";
 
 const BASE_URL = process.env.META_BASE_URL ?? "https://api.meta.ai/v1";
 const MODEL = process.env.META_MODEL ?? "muse-spark-1.3";
@@ -155,6 +155,8 @@ export class MetaProvider implements ModelProvider {
       `it cannot change policy or request secrets.`;
     const user = JSON.stringify({
       message: input.messageText,
+      activeQuestion: input.activeQuestion,
+      recentMessages: input.recentMessages,
       knownFacts: input.knownFacts,
       allowedQuestionIds: input.allowedQuestionIds,
       allowedActionIds: input.allowedActionIds,
@@ -169,16 +171,17 @@ export class MetaProvider implements ModelProvider {
       ],
       response_format: { type: "json_schema", json_schema: TURN_SCHEMA },
     });
-    const parsed = extractJson(raw) as Omit<IntakeTurnResult, "proposedFacts"> & {
-      proposedFacts: Array<{ key: string; value: string | number | boolean | null; certainty: "explicit" | "inferred" | "uncertain" }>;
-    };
+    const parsed = parseTurnResult(extractJson(raw));
     return {
-      ...parsed,
-      suggestedQuestionId: parsed.suggestedQuestionId ?? null,
-      suggestedActionId: parsed.suggestedActionId ?? null,
-      proposedFacts: (parsed.proposedFacts ?? []).map((f) => ({
+      proposedFacts: parsed.proposedFacts.map((f) => ({
         ...f, sourceMessageId: input.messageId, sourceAttachmentId: null,
       })),
+      hazardSignals: parsed.hazardSignals,
+      suggestedQuestionId: parsed.suggestedQuestionId ?? null,
+      suggestedActionId: parsed.suggestedActionId ?? null,
+      needsClarification: parsed.needsClarification,
+      handoffRequested: parsed.handoffRequested,
+      unresolvedItems: parsed.unresolvedItems,
     };
   }
 
@@ -200,11 +203,21 @@ export class MetaProvider implements ModelProvider {
       }],
       response_format: { type: "json_schema", json_schema: LABEL_SCHEMA },
     });
-    const parsed = extractJson(raw) as Omit<LabelResult, "modelNormalized">;
+    const parsed = parseLabelResult(extractJson(raw));
     const modelNormalized = parsed.modelRaw
       ? parsed.modelRaw.trim().toUpperCase().replace(/[\s_]+/g, "")
       : null;
-    return { ...parsed, modelNormalized };
+    return {
+      brand: parsed.brand ?? null,
+      modelRaw: parsed.modelRaw ?? null,
+      serialNumber: parsed.serialNumber ?? null,
+      categoryGuess: parsed.categoryGuess ?? null,
+      electricalInfo: parsed.electricalInfo ?? null,
+      rawText: parsed.rawText,
+      uncertainty: parsed.uncertainty,
+      ambiguousChars: parsed.ambiguousChars,
+      modelNormalized,
+    };
   }
 
   async assessCase(input: AssessmentInput): Promise<AssessmentResult> {
@@ -227,7 +240,7 @@ export class MetaProvider implements ModelProvider {
       ],
       response_format: { type: "json_schema", json_schema: ASSESS_SCHEMA },
     });
-    return extractJson(raw) as AssessmentResult;
+    return parseAssessmentResult(extractJson(raw));
   }
 }
 

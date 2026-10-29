@@ -54,7 +54,6 @@ export interface Store {
   // cases
   createCase(c: CaseRecord): Promise<void>;
   getCase(tenantId: string, caseId: string): Promise<CaseRecord | null>;
-  getCaseAnyTenant(caseId: string): Promise<CaseRecord | null>;
   updateCase(c: CaseRecord): Promise<void>;
   listCases(tenantId: string): Promise<CaseRecord[]>;
 
@@ -72,8 +71,10 @@ export interface Store {
   // sessions
   createSession(s: SessionRecord): Promise<void>;
   getSessionByTokenHash(hash: string): Promise<SessionRecord | null>;
-  getSessionByBootstrapHash(hash: string): Promise<SessionRecord | null>;
-  markBootstrapUsed(id: string): Promise<void>;
+  // Atomically consume a single-use bootstrap code. Returns the session only
+  // when the code exists, is unused, and is unexpired; concurrent consumes
+  // succeed exactly once.
+  consumeBootstrap(hash: string, now: string): Promise<SessionRecord | null>;
 
   // assessments / handoffs / events
   saveAssessment(a: Assessment): Promise<void>;
@@ -88,14 +89,14 @@ export interface Store {
   saveChunk(c: KnowledgeChunk): Promise<void>;
   listDocuments(tenantId: string): Promise<KnowledgeDocument[]>;
   listChunks(tenantId: string): Promise<KnowledgeChunk[]>;
-  getDocument(id: string): Promise<KnowledgeDocument | null>;
 
   // jobs (durable queue)
   enqueueJob(j: JobRecord): Promise<void>;
   leaseJob(now: string): Promise<JobRecord | null>;
   completeJob(id: string): Promise<void>;
   failJob(id: string, error: string, retryAt: string | null): Promise<void>;
-  hasPendingTurnJob(caseId: string): Promise<boolean>;
+  // True when an older turn job for the case still needs processing first.
+  olderTurnJobPending(caseId: string, beforeCreatedAt: string, excludeId: string): Promise<boolean>;
 
   // idempotency
   idempotencyGet(tenantId: string, key: string): Promise<string | null>;
@@ -110,10 +111,12 @@ export interface Store {
   // staff / service / outcomes
   saveStaffUser(u: StaffUser): Promise<void>;
   getStaffByEmail(tenantId: string, email: string): Promise<StaffUser | null>;
+  getStaffById(tenantId: string, id: string): Promise<StaffUser | null>;
   createStaffSession(s: StaffSession): Promise<void>;
   getStaffSession(id: string): Promise<StaffSession | null>;
   saveServiceCredential(c: ServiceCredential): Promise<void>;
   getServiceCredentialByHash(hash: string): Promise<ServiceCredential | null>;
+  listServiceCredentials(tenantId: string): Promise<Array<{ name: string; scopes: string[]; createdAt: string }>>;
   saveOutcome(o: OutcomeRecord): Promise<void>;
   getOutcome(tenantId: string, caseId: string): Promise<OutcomeRecord | null>;
 }

@@ -23,7 +23,17 @@ export function registerIntegrationRoutes(app: express.Express, deps: AppDeps): 
     next();
   }
 
-  app.post("/api/v1/integration/sessions", svcAuth, async (req, res) => {
+  function requireScope(scope: string) {
+    return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const { scopes } = req as unknown as { scopes: string[] };
+      if (!scopes.includes(scope)) {
+        return res.status(403).json(errorBody("FORBIDDEN", `Service key lacks scope: ${scope}.`, requestId()));
+      }
+      next();
+    };
+  }
+
+  app.post("/api/v1/integration/sessions", svcAuth, requireScope("sessions:write"), async (req, res) => {
     const rid = requestId();
     const { svcTenant } = req as unknown as { svcTenant: Parameters<typeof createCase>[1] };
     const schema = z.object({ externalReference: z.string().max(120).nullish() });
@@ -43,7 +53,7 @@ export function registerIntegrationRoutes(app: express.Express, deps: AppDeps): 
     res.status(201).json({ caseId: c.id, reference: c.reference, token, externalReference: c.externalReference });
   });
 
-  app.get("/api/v1/integration/cases/:caseId/handoff", svcAuth, async (req, res) => {
+  app.get("/api/v1/integration/cases/:caseId/handoff", svcAuth, requireScope("handoff:read"), async (req, res) => {
     const rid = requestId();
     const { svcTenant } = req as unknown as { svcTenant: { id: string } };
     const c = await deps.store.getCase(svcTenant.id, req.params.caseId);

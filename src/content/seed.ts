@@ -18,6 +18,8 @@ export function demoTenants(): TenantConfig[] {
     contact: { email: null, phone: null },
     timezone: "America/Phoenix",
     languages: ["en"],
+    // Platform hosted origin (port 3000) is always allowed at runtime; these
+    // are additional EXTERNAL demo-embed origins (separate host/port).
     allowedOrigins: ["http://localhost:3100", "http://127.0.0.1:3100"],
     publicKey: "pk_demo_phoenix_001",
     categories: ["refrigerator", "freezer", "washer", "dishwasher", "oven", "dryer", "other"],
@@ -68,12 +70,12 @@ export function demoTenants(): TenantConfig[] {
 // through the documented ingestion flow with source URLs and page citations.
 export function demoDocuments(): KnowledgeDocument[] {
   const base = {
-    publisher: "Demo playbook editors (technician-approved general guidance)",
+    publisher: "MendCue example playbook (illustrative content — not a manufacturer manual, not technician-approved)",
     sourceUrl: null,
     language: "en",
     retrievedAt: "2026-10-29T00:00:00Z",
     reviewStatus: "approved" as const,
-    reviewedBy: "demo-reviewer",
+    reviewedBy: "example-content (placeholder — not a real reviewer)",
   };
   return [
     {

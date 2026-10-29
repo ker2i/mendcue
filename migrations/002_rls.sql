@@ -6,7 +6,11 @@ DO $$ BEGIN
   END IF;
 END $$;
 
-GRANT CONNECT ON DATABASE CURRENT_CATALOG TO app_runtime;
+DO $$
+BEGIN
+  -- CURRENT_CATALOG is not substituted by GRANT; build the statement dynamically.
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO app_runtime', current_database());
+END $$;
 GRANT USAGE ON SCHEMA public TO app_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;

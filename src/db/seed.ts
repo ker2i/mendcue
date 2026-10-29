@@ -5,7 +5,7 @@ import { PgStore } from "./pg.js";
 import { MemoryStore } from "./memory.js";
 import type { Store } from "./store.js";
 import { DEMO_SERVICE_KEY_A, DEMO_STAFF, demoChunks, demoDocuments, demoTenants } from "../content/seed.js";
-import { sha256 } from "../server/auth.js";
+import { hashPassword, sha256 } from "../server/auth.js";
 
 export async function seedStore(store: Store): Promise<void> {
   for (const t of demoTenants()) await store.saveTenant(t);
@@ -17,7 +17,7 @@ export async function seedStore(store: Store): Promise<void> {
     if (!t) continue;
     await store.saveStaffUser({
       id: randomUUID(), tenantId: t.id, email: s.email,
-      passwordHash: sha256(`pw:${s.password}`), role: s.role, name: s.name,
+      passwordHash: await hashPassword(s.password), role: s.role, name: s.name,
     });
   }
   const a = tenants.find((x) => x.slug === "demo-phoenix-appliance");
@@ -46,7 +46,8 @@ if (isMain) {
   const pool = new Pool({ connectionString: url });
   try {
     await seedStore(new PgStore(pool));
-    console.log("Seed complete: 2 demo tenants, playbooks, demo staff, demo service key.");
+    console.log("Seed complete: 2 demo tenants, example playbooks, demo staff, demo service key.");
+    console.log("WARNING: demo credentials are published in source. Rotate them and remove demo tenants before any real use.");
   } finally {
     await pool.end();
   }

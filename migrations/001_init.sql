@@ -1,5 +1,4 @@
 -- 001_init.sql — core schema. All tenant-owned rows carry tenant_id.
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY,

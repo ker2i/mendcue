@@ -1,6 +1,14 @@
 // Postgres store. Sets app.tenant_id per transaction for RLS defense-in-depth;
 // application code still scopes every query by tenant_id explicitly.
-import { Pool } from "pg";
+// Auth/session/worker bootstrap operations go through the narrow SECURITY
+// DEFINER functions from migration 004 — the only pre-tenant-context paths.
+export interface PgPoolLike {
+  query(text: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  connect(): Promise<{
+    query(text: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+    release(): void;
+  }>;
+}
 import type { Assessment, Attachment, CaseEvent, CaseFact, CaseRecord, Handoff, Message, TenantConfig } from "../domain/types.js";
 import type { KnowledgeChunk, KnowledgeDocument } from "../domain/knowledge.js";
 import type { JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffSession, StaffUser, Store, WebhookDelivery, WebhookEndpoint } from "./store.js";
@@ -8,7 +16,7 @@ import type { JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffS
 const iso = (v: unknown): string => (v instanceof Date ? v.toISOString() : String(v));
 
 export class PgStore implements Store {
-  constructor(private pool: Pool) {}
+  constructor(private pool: PgPoolLike) {}
 
   private async tenant<T>(tenantId: string, fn: (q: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -59,7 +67,9 @@ export class PgStore implements Store {
       id: String(r.id), tenantId: String(r.tenant_id), reference: String(r.reference),
       source: r.source as CaseRecord["source"], conversationPhase: r.conversation_phase as CaseRecord["conversationPhase"],
       workflowStatus: r.workflow_status as CaseRecord["workflowStatus"], safetyStatus: r.safety_status as CaseRecord["safetyStatus"],
-      disposition: r.disposition as CaseRecord["disposition"], version: Number(r.version),
+      disposition: r.disposition as CaseRecord["disposition"],
+      pendingAction: (r.pending_action as CaseRecord["pendingAction"]) ?? null,
+      version: Number(r.version),
       externalReference: (r.external_reference as string) ?? null,
       diagnosticQuestionsAsked: Number(r.diagnostic_questions_asked ?? 0),
       modelMode: (r.model_mode as CaseRecord["modelMode"]) ?? "fixture",
@@ -80,14 +90,10 @@ export class PgStore implements Store {
       return r.rows[0] ? this.caseFrom(r.rows[0]) : null;
     });
   }
-  async getCaseAnyTenant(caseId: string) {
-    const r = await this.query("SELECT * FROM cases WHERE id=$1", [caseId]);
-    return r.rows[0] ? this.caseFrom(r.rows[0] as Record<string, unknown>) : null;
-  }
   async updateCase(c: CaseRecord) {
     await this.tenant(c.tenantId, async (q) => {
-      await q("UPDATE cases SET conversation_phase=$1, workflow_status=$2, safety_status=$3, disposition=$4, version=$5, external_reference=$6, diagnostic_questions_asked=$7, model_mode=$8, updated_at=now(), submitted_at=$9 WHERE tenant_id=$10 AND id=$11",
-        [c.conversationPhase, c.workflowStatus, c.safetyStatus, c.disposition, c.version, c.externalReference, c.diagnosticQuestionsAsked, c.modelMode, c.submittedAt, c.tenantId, c.id]);
+      await q("UPDATE cases SET conversation_phase=$1, workflow_status=$2, safety_status=$3, disposition=$4, version=$5, external_reference=$6, diagnostic_questions_asked=$7, model_mode=$8, updated_at=now(), submitted_at=$9, pending_action=$10 WHERE tenant_id=$11 AND id=$12",
+        [c.conversationPhase, c.workflowStatus, c.safetyStatus, c.disposition, c.version, c.externalReference, c.diagnosticQuestionsAsked, c.modelMode, c.submittedAt, c.pendingAction ? JSON.stringify(c.pendingAction) : null, c.tenantId, c.id]);
     });
   }
   async listCases(tenantId: string) {
@@ -166,17 +172,14 @@ export class PgStore implements Store {
     });
   }
   async getSessionByTokenHash(hash: string) {
-    const r = await this.query("SELECT * FROM customer_sessions WHERE token_hash=$1", [hash]);
+    const r = await this.query("SELECT * FROM auth_session_by_token($1)", [hash]);
     const x = r.rows[0] as Record<string, unknown> | undefined;
     return x ? { id: String(x.id), tenantId: String(x.tenant_id), caseId: String(x.case_id), tokenHash: String(x.token_hash), bootstrapCodeHash: x.bootstrap_code_hash ? String(x.bootstrap_code_hash) : null, bootstrapUsed: Boolean(x.bootstrap_used), createdAt: iso(x.created_at), expiresAt: iso(x.expires_at) } : null;
   }
-  async getSessionByBootstrapHash(hash: string) {
-    const r = await this.query("SELECT * FROM customer_sessions WHERE bootstrap_code_hash=$1", [hash]);
+  async consumeBootstrap(hash: string, now: string) {
+    const r = await this.query("SELECT * FROM auth_consume_bootstrap($1, $2::timestamptz)", [hash, now]);
     const x = r.rows[0] as Record<string, unknown> | undefined;
-    return x ? { id: String(x.id), tenantId: String(x.tenant_id), caseId: String(x.case_id), tokenHash: String(x.token_hash), bootstrapCodeHash: x.bootstrap_code_hash ? String(x.bootstrap_code_hash) : null, bootstrapUsed: Boolean(x.bootstrap_used), createdAt: iso(x.created_at), expiresAt: iso(x.expires_at) } : null;
-  }
-  async markBootstrapUsed(id: string) {
-    await this.query("UPDATE customer_sessions SET bootstrap_used=TRUE, bootstrap_code_hash=NULL WHERE id=$1", [id]);
+    return x ? { id: String(x.id), tenantId: String(x.tenant_id), caseId: String(x.case_id), tokenHash: String(x.token_hash), bootstrapCodeHash: null, bootstrapUsed: true, createdAt: iso(x.created_at), expiresAt: iso(x.expires_at) } : null;
   }
 
   async saveAssessment(a: Assessment) {
@@ -216,25 +219,28 @@ export class PgStore implements Store {
   }
 
   async saveDocument(d: KnowledgeDocument) {
-    await this.query("INSERT INTO knowledge_documents(id, tenant_id, visibility, publisher, source_url, document_type, title, language, brand, explicit_models, explicit_families, hash, version, review_status, reviewed_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING",
-      [d.id, d.tenantId, d.visibility, d.publisher, d.sourceUrl, d.documentType, d.title, d.language, d.brand, JSON.stringify(d.explicitModels), JSON.stringify(d.explicitFamilies), d.hash, d.version, d.reviewStatus, d.reviewedBy]);
+    await this.tenant(d.tenantId ?? "", async (q) => {
+      await q("INSERT INTO knowledge_documents(id, tenant_id, visibility, publisher, source_url, document_type, title, language, brand, explicit_models, explicit_families, hash, version, review_status, reviewed_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING",
+        [d.id, d.tenantId, d.visibility, d.publisher, d.sourceUrl, d.documentType, d.title, d.language, d.brand, JSON.stringify(d.explicitModels), JSON.stringify(d.explicitFamilies), d.hash, d.version, d.reviewStatus, d.reviewedBy]);
+    });
   }
   async saveChunk(c: KnowledgeChunk) {
-    await this.query("INSERT INTO knowledge_chunks(id, document_id, tenant_id, visibility, version, page_index, page_label, text, applicability) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING",
-      [c.id, c.tenantId, c.tenantId, c.visibility, c.version, c.pageIndex, c.pageLabel, c.text, JSON.stringify(c.applicability)]);
+    await this.tenant(c.tenantId ?? "", async (q) => {
+      await q("INSERT INTO knowledge_chunks(id, document_id, tenant_id, visibility, version, page_index, page_label, text, applicability) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING",
+        [c.id, c.documentId, c.tenantId, c.visibility, c.version, c.pageIndex, c.pageLabel, c.text, JSON.stringify(c.applicability)]);
+    });
   }
   async listDocuments(tenantId: string) {
-    const r = await this.query("SELECT * FROM knowledge_documents WHERE visibility='shared' OR tenant_id=$1", [tenantId]);
-    return r.rows.map((x) => this.docFrom(x as Record<string, unknown>));
+    return this.tenant(tenantId, async (q) => {
+      const r = await q("SELECT * FROM knowledge_documents WHERE visibility='shared' OR tenant_id=$1", [tenantId]);
+      return r.rows.map((x) => this.docFrom(x as Record<string, unknown>));
+    });
   }
   async listChunks(tenantId: string) {
-    const r = await this.query("SELECT * FROM knowledge_chunks WHERE visibility='shared' OR tenant_id=$1", [tenantId]);
-    return r.rows.map((x) => ({ id: String(x.id), documentId: String(x.document_id), tenantId: x.tenant_id ? String(x.tenant_id) : null, visibility: x.visibility as KnowledgeChunk["visibility"], version: String(x.version), pageIndex: Number(x.page_index), pageLabel: x.page_label ? String(x.page_label) : null, text: String(x.text), applicability: x.applicability as KnowledgeChunk["applicability"] }));
-  }
-  async getDocument(id: string) {
-    const r = await this.query("SELECT * FROM knowledge_documents WHERE id=$1", [id]);
-    const x = r.rows[0] as Record<string, unknown> | undefined;
-    return x ? this.docFrom(x) : null;
+    return this.tenant(tenantId, async (q) => {
+      const r = await q("SELECT * FROM knowledge_chunks WHERE visibility='shared' OR tenant_id=$1", [tenantId]);
+      return r.rows.map((x) => ({ id: String(x.id), documentId: String(x.document_id), tenantId: x.tenant_id ? String(x.tenant_id) : null, visibility: x.visibility as KnowledgeChunk["visibility"], version: String(x.version), pageIndex: Number(x.page_index), pageLabel: x.page_label ? String(x.page_label) : null, text: String(x.text), applicability: x.applicability as KnowledgeChunk["applicability"] }));
+    });
   }
   private docFrom(x: Record<string, unknown>): KnowledgeDocument {
     return { id: String(x.id), tenantId: x.tenant_id ? String(x.tenant_id) : null, visibility: x.visibility as KnowledgeDocument["visibility"], publisher: String(x.publisher), sourceUrl: x.source_url ? String(x.source_url) : null, documentType: String(x.document_type), title: String(x.title), language: String(x.language), brand: x.brand ? String(x.brand) : null, explicitModels: (x.explicit_models as string[]) ?? [], explicitFamilies: (x.explicit_families as string[]) ?? [], retrievedAt: iso(x.retrieved_at), hash: String(x.hash), version: String(x.version), reviewStatus: x.review_status as KnowledgeDocument["reviewStatus"], reviewedBy: x.reviewed_by ? String(x.reviewed_by) : null };
@@ -247,24 +253,21 @@ export class PgStore implements Store {
     });
   }
   async leaseJob(now: string) {
-    const r = await this.query(
-      `UPDATE background_jobs SET status='leased', attempts=attempts+1, lease_until=now()+interval '60 seconds', updated_at=now()
-       WHERE id=(SELECT id FROM background_jobs WHERE status='pending' OR (status='leased' AND lease_until < $1::timestamptz) ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
-       RETURNING *`, [now]);
+    const r = await this.query("SELECT * FROM worker_lease_job($1::timestamptz)", [now]);
     const x = r.rows[0] as Record<string, unknown> | undefined;
     return x ? this.jobFrom(x) : null;
   }
+  async olderTurnJobPending(caseId: string, beforeCreatedAt: string, excludeId: string) {
+    const r = await this.query("SELECT worker_older_turn_pending($1, $2::timestamptz, $3) AS pending", [caseId, beforeCreatedAt, excludeId]);
+    return r.rows[0]?.pending === true;
+  }
   async completeJob(id: string) {
-    await this.query("UPDATE background_jobs SET status='done', updated_at=now() WHERE id=$1", [id]);
+    await this.query("SELECT worker_complete_job($1)", [id]);
   }
   async failJob(id: string, error: string, retryAt: string | null) {
-    if (retryAt) await this.query("UPDATE background_jobs SET status='pending', lease_until=NULL, last_error=$2, updated_at=now() WHERE id=$1", [id, error]);
-    else await this.query("UPDATE background_jobs SET status='failed', last_error=$2, updated_at=now() WHERE id=$1", [id, error]);
+    await this.query("SELECT worker_fail_job($1, $2, $3)", [id, error, retryAt !== null]);
   }
-  async hasPendingTurnJob(caseId: string) {
-    const r = await this.query("SELECT 1 FROM background_jobs WHERE case_id=$1 AND kind='turn' AND status IN ('pending','leased') LIMIT 1", [caseId]);
-    return r.rows.length > 0;
-  }
+
   private jobFrom(x: Record<string, unknown>): JobRecord {
     return { id: String(x.id), tenantId: String(x.tenant_id), caseId: x.case_id ? String(x.case_id) : null, kind: String(x.kind), payload: (x.payload as Record<string, unknown>) ?? {}, status: x.status as JobRecord["status"], attempts: Number(x.attempts), maxAttempts: Number(x.max_attempts), leaseUntil: x.lease_until ? iso(x.lease_until) : null, lastError: x.last_error ? String(x.last_error) : null, createdAt: iso(x.created_at), updatedAt: iso(x.updated_at) };
   }
@@ -319,13 +322,20 @@ export class PgStore implements Store {
       return x ? { id: String(x.id), tenantId: String(x.tenant_id), email: String(x.email), passwordHash: String(x.password_hash), role: x.role as StaffUser["role"], name: String(x.name) } : null;
     });
   }
+  async getStaffById(tenantId: string, id: string) {
+    return this.tenant(tenantId, async (q) => {
+      const r = await q("SELECT * FROM staff_users WHERE tenant_id=$1 AND id=$2", [tenantId, id]);
+      const x = r.rows[0];
+      return x ? { id: String(x.id), tenantId: String(x.tenant_id), email: String(x.email), passwordHash: String(x.password_hash), role: x.role as StaffUser["role"], name: String(x.name) } : null;
+    });
+  }
   async createStaffSession(s: StaffSession) {
     await this.tenant(s.tenantId, async (q) => {
       await q("INSERT INTO staff_sessions(id, user_id, tenant_id, expires_at) VALUES($1,$2,$3,$4)", [s.id, s.userId, s.tenantId, s.expiresAt]);
     });
   }
   async getStaffSession(id: string) {
-    const r = await this.query("SELECT * FROM staff_sessions WHERE id=$1", [id]);
+    const r = await this.query("SELECT * FROM auth_staff_session($1)", [id]);
     const x = r.rows[0] as Record<string, unknown> | undefined;
     return x ? { id: String(x.id), userId: String(x.user_id), tenantId: String(x.tenant_id), createdAt: iso(x.created_at), expiresAt: iso(x.expires_at) } : null;
   }
@@ -335,9 +345,15 @@ export class PgStore implements Store {
     });
   }
   async getServiceCredentialByHash(hash: string) {
-    const r = await this.query("SELECT * FROM service_credentials WHERE key_hash=$1", [hash]);
+    const r = await this.query("SELECT * FROM auth_service_key($1)", [hash]);
     const x = r.rows[0] as Record<string, unknown> | undefined;
     return x ? { id: String(x.id), tenantId: String(x.tenant_id), name: String(x.name), keyHash: String(x.key_hash), scopes: (x.scopes as string[]) ?? [], createdAt: iso(x.created_at) } : null;
+  }
+  async listServiceCredentials(tenantId: string) {
+    return this.tenant(tenantId, async (q) => {
+      const r = await q("SELECT name, scopes, created_at FROM service_credentials WHERE tenant_id=$1", [tenantId]);
+      return r.rows.map((x) => ({ name: String(x.name), scopes: (x.scopes as string[]) ?? [], createdAt: iso(x.created_at) }));
+    });
   }
   async saveOutcome(o: OutcomeRecord) {
     await this.tenant(o.tenantId, async (q) => {

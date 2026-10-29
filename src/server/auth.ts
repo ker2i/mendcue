@@ -1,9 +1,29 @@
 // Auth helpers: opaque Bearer tokens (hashed at rest), bootstrap codes, staff cookies, CSRF.
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import type { Request } from "express";
+
+const scryptAsync = promisify(scryptCb);
 
 export function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
+}
+
+// Staff passwords: salted scrypt. Stored format "saltHex:derivedHex".
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const derived = (await scryptAsync(password, salt, 32)) as Buffer;
+  return `${salt.toString("hex")}:${derived.toString("hex")}`;
+}
+
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  // Legacy unsalted demo hashes ("sha256('pw:...')") are rejected: rotate them.
+  if (!stored.includes(":")) return false;
+  const [saltHex, derivedHex] = stored.split(":");
+  if (!saltHex || !derivedHex) return false;
+  const derived = (await scryptAsync(password, Buffer.from(saltHex, "hex"), 32)) as Buffer;
+  const expected = Buffer.from(derivedHex, "hex");
+  return derived.length === expected.length && timingSafeEqual(derived, expected);
 }
 
 export function newToken(prefix: string): string {

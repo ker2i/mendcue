@@ -5,9 +5,9 @@
   "description": "Tenant-aware appliance service intake platform (hackathon scope)",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/server/ui && cp src/server/ui/app.css src/server/ui/*.js dist/server/ui/",
     "start": "node dist/server/index.js",
-    "dev": "node --loader ts-node/esm src/server/index.ts",
+    "dev": "npm run build && node dist/server/index.js",
     "worker": "node dist/worker/index.js",
     "migrate": "node dist/db/migrate.js",
     "seed": "node dist/db/seed.js",
@@ -25,6 +25,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.13",
     "@types/cookie-parser": "^1.4.7",
     "@types/express": "^4.17.21",
     "@types/multer": "^1.4.12",
@@ -32,6 +33,7 @@
     "@types/pg": "^8.11.0",
     "@types/supertest": "^6.0.2",
     "@types/uuid": "^9.0.8",
+    "puppeteer-core": "^24.43.1",
     "supertest": "^7.0.0",
     "typescript": "^5.4.5",
     "vitest": "^2.0.5"

@@ -43,10 +43,6 @@ export class MemoryStore implements Store {
     if (!c || c.tenantId !== tenantId) return null;
     return structuredClone(c);
   }
-  async getCaseAnyTenant(caseId: string) {
-    const c = this.cases.get(caseId);
-    return c ? structuredClone(c) : null;
-  }
   async updateCase(c: CaseRecord) { this.cases.set(c.id, structuredClone(c)); }
   async listCases(tenantId: string) {
     return [...this.cases.values()].filter((c) => c.tenantId === tenantId).map((c) => structuredClone(c));
@@ -81,13 +77,15 @@ export class MemoryStore implements Store {
     for (const s of this.sessions.values()) if (s.tokenHash === hash) return structuredClone(s);
     return null;
   }
-  async getSessionByBootstrapHash(hash: string) {
-    for (const s of this.sessions.values()) if (s.bootstrapCodeHash === hash) return structuredClone(s);
+  async consumeBootstrap(hash: string, now: string) {
+    for (const s of this.sessions.values()) {
+      if (s.bootstrapCodeHash !== hash) continue;
+      if (s.bootstrapUsed || s.expiresAt < now) return null;
+      s.bootstrapUsed = true;
+      s.bootstrapCodeHash = null;
+      return structuredClone(s);
+    }
     return null;
-  }
-  async markBootstrapUsed(id: string) {
-    const s = this.sessions.get(id);
-    if (s) { s.bootstrapUsed = true; s.bootstrapCodeHash = null; }
   }
 
   async saveAssessment(a: Assessment) { this.assessments.set(`${a.tenantId}:${a.caseId}`, structuredClone(a)); }
@@ -111,7 +109,7 @@ export class MemoryStore implements Store {
   async listChunks(tenantId: string) {
     return [...this.chunks.values()].filter((c) => c.visibility === "shared" || c.tenantId === tenantId).map((c) => structuredClone(c));
   }
-  async getDocument(id: string) { return structuredClone(this.documents.get(id) ?? null); }
+
 
   async enqueueJob(j: JobRecord) { this.jobs.push(structuredClone(j)); }
   async leaseJob(now: string) {
@@ -123,6 +121,10 @@ export class MemoryStore implements Store {
     job.leaseUntil = new Date(Date.now() + 60000).toISOString();
     job.updatedAt = now;
     return structuredClone(job);
+  }
+  async olderTurnJobPending(caseId: string, beforeCreatedAt: string, excludeId: string) {
+    return this.jobs.some((j) => j.caseId === caseId && j.kind === "turn" && j.id !== excludeId &&
+      (j.status === "pending" || j.status === "leased") && j.createdAt < beforeCreatedAt);
   }
   async completeJob(id: string) {
     const j = this.jobs.find((x) => x.id === id);
@@ -136,10 +138,6 @@ export class MemoryStore implements Store {
     if (retryAt && j.attempts < j.maxAttempts) { j.status = "pending"; j.leaseUntil = null; }
     else j.status = "failed";
   }
-  async hasPendingTurnJob(caseId: string) {
-    return this.jobs.some((j) => j.caseId === caseId && j.kind === "turn" && (j.status === "pending" || j.status === "leased"));
-  }
-
   async idempotencyGet(tenantId: string, key: string) { return this.idem.get(`${tenantId}:${key}`) ?? null; }
   async idempotencyPut(tenantId: string, key: string, responseHash: string) { this.idem.set(`${tenantId}:${key}`, responseHash); }
 
@@ -159,12 +157,22 @@ export class MemoryStore implements Store {
     }
     return null;
   }
+  async getStaffById(tenantId: string, id: string) {
+    const u = this.staff.get(id);
+    if (!u || u.tenantId !== tenantId) return null;
+    return structuredClone(u);
+  }
   async createStaffSession(s: StaffSession) { this.staffSessions.set(s.id, structuredClone(s)); }
   async getStaffSession(id: string) { return structuredClone(this.staffSessions.get(id) ?? null); }
   async saveServiceCredential(c: ServiceCredential) { this.svcCreds.set(c.id, structuredClone(c)); }
   async getServiceCredentialByHash(hash: string) {
     for (const c of this.svcCreds.values()) if (c.keyHash === hash) return structuredClone(c);
     return null;
+  }
+  async listServiceCredentials(tenantId: string) {
+    return [...this.svcCreds.values()]
+      .filter((c) => c.tenantId === tenantId)
+      .map((c) => ({ name: c.name, scopes: [...c.scopes], createdAt: c.createdAt }));
   }
   async saveOutcome(o: OutcomeRecord) { this.outcomes.set(`${o.tenantId}:${o.caseId}`, structuredClone(o)); }
   async getOutcome(tenantId: string, caseId: string) {

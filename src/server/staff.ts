@@ -4,7 +4,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { AppDeps } from "./app.js";
 import { errorBody } from "../domain/types.js";
-import { csrfToken, requestId, sha256 } from "./auth.js";
+import { csrfToken, rateLimit, requestId, verifyPassword } from "./auth.js";
 
 const COOKIE = "staff_session";
 const CSRF_COOKIE = "staff_csrf";
@@ -15,10 +15,14 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     const schema = z.object({ tenantSlug: z.string().min(1), email: z.string().email(), password: z.string().min(1) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "tenantSlug, email, password required.", rid));
+    const ip = String(req.ip ?? "unknown");
+    if (!rateLimit(`login:${ip}`, 10, 60_000)) {
+      return res.status(429).json(errorBody("RATE_LIMITED", "Too many login attempts.", rid));
+    }
     const tenant = await deps.store.getTenantBySlug(parsed.data.tenantSlug);
     if (!tenant) return res.status(401).json(errorBody("UNAUTHORIZED", "Invalid login.", rid));
     const user = await deps.store.getStaffByEmail(tenant.id, parsed.data.email);
-    if (!user || user.passwordHash !== sha256(`pw:${parsed.data.password}`)) {
+    if (!user || !(await verifyPassword(parsed.data.password, user.passwordHash))) {
       return res.status(401).json(errorBody("UNAUTHORIZED", "Invalid login.", rid));
     }
     const sid = randomUUID();
@@ -50,13 +54,27 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     }
     const tenant = await deps.store.getTenant(s.tenantId);
     if (!tenant) return res.status(401).json(errorBody("UNAUTHORIZED", "Unknown tenant.", rid));
-    (req as unknown as { staffTenant: typeof tenant; staffSession: typeof s }).staffTenant = tenant;
+    // Revalidate membership and role on every request.
+    const user = await deps.store.getStaffById(s.tenantId, s.userId);
+    if (!user) return res.status(401).json(errorBody("UNAUTHORIZED", "Unknown staff user.", rid));
+    (req as unknown as { staffTenant: typeof tenant; staffSession: typeof s; staffUser: typeof user }).staffTenant = tenant;
     (req as unknown as { staffSession: typeof s }).staffSession = s;
+    (req as unknown as { staffUser: typeof user }).staffUser = user;
     next();
   }
 
   const ctx = (req: express.Request) =>
-    req as unknown as { staffTenant: { id: string; slug: string }; staffSession: { userId: string } };
+    req as unknown as { staffTenant: { id: string; slug: string }; staffSession: { userId: string }; staffUser: { role: string } };
+
+  // Server-enforced permission matrix: read-only staff may read but never
+  // mutate cases or outcomes. Technician, dispatcher, and owner may mutate.
+  function requireMutate(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const { staffUser } = ctx(req);
+    if (staffUser.role === "readonly") {
+      return res.status(403).json(errorBody("FORBIDDEN", "Read-only role cannot modify cases.", requestId()));
+    }
+    next();
+  }
 
   app.get("/api/v1/staff/cases", staffAuth, async (req, res) => {
     const { staffTenant } = ctx(req);
@@ -95,11 +113,12 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     res.json({ case: c, facts, messages, attachments, handoffs, events, assessment, outcome });
   });
 
-  app.patch("/api/v1/staff/cases/:caseId", staffAuth, async (req, res) => {
+  app.patch("/api/v1/staff/cases/:caseId", staffAuth, requireMutate, async (req, res) => {
     const rid = requestId();
     const { staffTenant } = ctx(req);
     const schema = z.object({
       workflowStatus: z.enum(["draft", "new", "reviewing", "contacted", "scheduled", "closed", "cancelled"]).optional(),
+      safetyStatus: z.enum(["unchecked", "no_hazard_reported", "needs_review", "stop_use", "emergency"]).optional(),
       assignee: z.string().max(120).nullish(),
       note: z.string().max(2000).nullish(),
       version: z.number(),
@@ -112,6 +131,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
       return res.status(409).json(errorBody("CASE_VERSION_CONFLICT", "This case changed. Refresh before saving.", rid));
     }
     if (parsed.data.workflowStatus) c.workflowStatus = parsed.data.workflowStatus;
+    if (parsed.data.safetyStatus) c.safetyStatus = parsed.data.safetyStatus;
     const now = new Date().toISOString();
     c.version += 1;
     c.updatedAt = now;
@@ -132,7 +152,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     res.json({ ok: true, version: c.version });
   });
 
-  app.post("/api/v1/staff/cases/:caseId/outcome", staffAuth, async (req, res) => {
+  app.post("/api/v1/staff/cases/:caseId/outcome", staffAuth, requireMutate, async (req, res) => {
     const rid = requestId();
     const { staffTenant, staffSession } = ctx(req);
     const schema = z.object({
@@ -160,6 +180,49 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
       deps.store.listChunks(staffTenant.id),
     ]);
     res.json({ documents, chunks });
+  });
+
+  app.get("/api/v1/staff/cases/:caseId/attachments/:attachmentId", staffAuth, async (req, res) => {
+    const rid = requestId();
+    const { staffTenant } = ctx(req);
+    const c = await deps.store.getCase(staffTenant.id, req.params.caseId);
+    if (!c) return res.status(404).json(errorBody("NOT_FOUND", "Case not found.", rid));
+    const atts = await deps.store.listAttachments(staffTenant.id, c.id);
+    const att = atts.find((a) => a.id === req.params.attachmentId);
+    if (!att) return res.status(404).json(errorBody("NOT_FOUND", "Attachment not found.", rid));
+    const buf = await deps.storage.get(att.storageKey);
+    if (!buf) return res.status(404).json(errorBody("NOT_FOUND", "File missing.", rid));
+    await deps.store.addEvent({
+      id: randomUUID(), tenantId: staffTenant.id, caseId: c.id, type: "staff_photo_view",
+      payload: { attachmentId: att.id }, createdAt: new Date().toISOString(),
+    });
+    res.setHeader("content-type", att.mimeType);
+    res.setHeader("cache-control", "private, max-age=60");
+    res.send(Buffer.from(buf));
+  });
+
+  app.get("/api/v1/staff/settings", staffAuth, async (req, res) => {
+    const { staffTenant } = ctx(req);
+    const tenant = await deps.store.getTenant(staffTenant.id);
+    const [endpoints, deliveries, documents, chunks, credentials] = await Promise.all([
+      deps.store.listEndpoints(staffTenant.id),
+      deps.store.listDeliveries(staffTenant.id),
+      deps.store.listDocuments(staffTenant.id),
+      deps.store.listChunks(staffTenant.id),
+      deps.store.listServiceCredentials(staffTenant.id),
+    ]);
+    res.json({
+      tenant,
+      webhooks: {
+        endpoints: endpoints.map((e) => ({ id: e.id, url: e.url, events: e.events, active: e.active })),
+        deliveries: deliveries.slice(0, 20),
+      },
+      knowledge: {
+        documents: documents.map((d) => ({ id: d.id, title: d.title, version: d.version, reviewStatus: d.reviewStatus, visibility: d.visibility })),
+        chunkCount: chunks.length,
+      },
+      serviceCredentials: credentials,
+    });
   });
 
   app.get("/api/v1/staff/metrics", staffAuth, async (req, res) => {
