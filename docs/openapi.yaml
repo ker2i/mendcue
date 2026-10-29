@@ -1,0 +1,222 @@
+openapi: 3.0.3
+info:
+  title: Appliance Intake API
+  version: 1.0.0
+  description: |
+    Tenant-aware appliance service intake. One engine serves the embedded widget,
+    hosted business site, staff dashboard, and headless REST API.
+    Demonstration tenants only — no production insurer onboarding is claimed.
+servers:
+  - url: https://PLATFORM_HOST/api/v1
+paths:
+  /public/widget-config/{publicKey}:
+    get:
+      summary: Public widget configuration
+      parameters:
+        - in: path
+          name: publicKey
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Branding, features, opening message }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /public/sessions:
+    post:
+      summary: Start an anonymous intake
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [publicKey]
+              properties:
+                publicKey: { type: string }
+                source: { type: string, enum: [widget, hosted], default: widget }
+      responses:
+        '201': { description: Bootstrap code + case id }
+        '403': { description: Origin not allowed }
+  /sessions/exchange:
+    post:
+      summary: Exchange one-time bootstrap code for a case token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200': { description: Case token }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /cases/{caseId}:
+    get:
+      summary: Read allowed case state
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      responses:
+        '200': { description: Case, facts, messages, attachments }
+  /cases/{caseId}/events:
+    get:
+      summary: Polling events, or SSE with Accept text/event-stream
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      responses:
+        '200': { description: Events / stream }
+  /cases/{caseId}/messages:
+    post:
+      summary: Submit customer message
+      security: [{ caseToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/CaseId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 4000 }
+      responses:
+        '201': { description: Validated reply }
+        '202': { description: Accepted for background processing }
+  /cases/{caseId}/attachments:
+    post:
+      summary: Upload photograph (JPEG/PNG/WebP, 8 MB, max 8 per case)
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                photo: { type: string, format: binary }
+                kind: { type: string, enum: [label_photo, error_display, other] }
+      responses:
+        '201': { description: Stored + label outcome }
+        '415': { description: Unsupported media }
+  /cases/{caseId}/facts:
+    patch:
+      summary: Correct customer-provided information (optimistic version)
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value, version]
+              properties:
+                key: { type: string }
+                value: {}
+                version: { type: number }
+      responses:
+        '200': { description: Corrected }
+        '409': { description: Version conflict }
+  /cases/{caseId}/submit:
+    post:
+      summary: Confirm handoff (explicit customer action)
+      security: [{ caseToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/CaseId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '201': { description: Reference + handoff version }
+  /cases/{caseId}/request-human:
+    post:
+      summary: Request human assistance
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      responses:
+        '200': { description: Flagged }
+  /integration/sessions:
+    post:
+      summary: Start intake from a business backend (scoped service key)
+      security: [{ serviceKey: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                externalReference: { type: string }
+      responses:
+        '201': { description: Case + token }
+  /integration/cases/{caseId}/handoff:
+    get:
+      summary: Retrieve structured handoff
+      security: [{ serviceKey: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      responses:
+        '200': { description: Handoff snapshot }
+  /staff/cases:
+    get:
+      summary: Organization inbox (staff session)
+      responses:
+        '200': { description: Inbox rows }
+  /staff/cases/{caseId}:
+    patch:
+      summary: Assignment and operational updates (CSRF + version)
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      responses:
+        '200': { description: Updated }
+  /staff/cases/{caseId}/outcome:
+    post:
+      summary: Record repair outcome
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: string, enum: [useful_as_received, useful_after_corrections, needed_followup, misleading_or_unusable] }
+                confirmedIssue: { type: string }
+                hypothesesUseful: { type: boolean }
+      responses:
+        '200': { description: Saved }
+components:
+  securitySchemes:
+    caseToken: { type: http, scheme: bearer, description: Short-lived case capability token }
+    serviceKey: { type: http, scheme: bearer, description: Scoped service key (server-side only) }
+  parameters:
+    CaseId:
+      in: path
+      name: caseId
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: false
+      schema: { type: string }
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
