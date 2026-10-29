@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Example partner site — widget embed</title></head>
+<body>
+<h1>Example Partner Appliances</h1>
+<p>Demonstrates the launcher embed on an external origin.</p>
+
+<script
+  src="https://PLATFORM_HOST/widget/v1.js"
+  data-public-key="pk_demo_harbor_001"
+  data-mode="launcher"
+  defer></script>
+
+<script>
+  // Host-page events carry no PII — transcripts and photos never leave the iframe.
+  for (const t of ["intake.opened", "intake.submitted", "intake.closed", "intake.error"]) {
+    window.addEventListener(t, () => console.log("host event:", t));
+  }
+</script>
+</body>
+</html>
