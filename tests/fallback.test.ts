@@ -25,7 +25,10 @@ describe("model failure fallback", () => {
     const outcome = await processTurn(deps, tenant, c.id, msgId, "Washer broken 85003");
     expect(outcome.modelMode).toBe("fallback");
     expect(outcome.reply).toMatch(/can still collect your details/i);
-    const { assessment } = await submitCase(deps, tenant, c.id);
+    const msg2 = randomUUID();
+    await store.addMessage({ id: msg2, tenantId: tenant.id, caseId: c.id, role: "customer", body: "done", createdAt: new Date().toISOString() });
+    await processTurn(deps, tenant, c.id, msg2, "done");
+    const { assessment } = await submitCase(deps, tenant, c.id, { acknowledgeIncomplete: true });
     expect(assessment.status).toBe("assessment_unavailable");
     const handoffs = await store.listHandoffs(tenant.id, c.id);
     expect(handoffs).toHaveLength(1);

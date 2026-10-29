@@ -24,7 +24,11 @@ describe("labels and knowledge", () => {
     expect(r.status).toBe(201);
     expect(r.body.reply as string).toMatch(/WM3900HBA/);
     const conf = await say(app, s.caseId, s.token, "yes");
-    expect(conf.body.confirmed).toBe(true);
+    expect(conf.body.reply as string).toMatch(/model recorded as WM3900HBA/);
+    // Explicit card confirmation path rejects when nothing is pending.
+    const dup = await request(app).post(`/api/v1/cases/${s.caseId}/confirm-model`)
+      .set("authorization", `Bearer ${s.token}`).send({ confirm: true });
+    expect(dup.status).toBe(400);
   });
 
   it("ambiguous O/0 characters stay unresolved, never an exact match", async () => {
@@ -97,7 +101,7 @@ describe("reliability and integration", () => {
     const s = await startSession(app, "pk_demo_phoenix_001");
     await say(app, s.caseId, s.token, "Fridge warm, freezer fine.");
     await say(app, s.caseId, s.token, "submit");
-    await request(app).post(`/api/v1/cases/${s.caseId}/submit`).set("authorization", `Bearer ${s.token}`);
+    await request(app).post(`/api/v1/cases/${s.caseId}/submit`).set("authorization", `Bearer ${s.token}`).send({ acknowledgeIncomplete: true });
     const agent = request.agent(app);
     await agent.post("/api/v1/staff/login").send({
       tenantSlug: "demo-phoenix-appliance", email: "tech@demo-phoenix.invalid", password: "demo-tech-1234",

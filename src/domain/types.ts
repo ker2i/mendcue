@@ -68,6 +68,12 @@ export interface TenantConfig {
   featureFlags: { photos: boolean; knowledge: boolean; recall: boolean };
 }
 
+export type PendingAction =
+  | { kind: "model_confirm"; modelRaw: string; attachmentId: string }
+  | { kind: "conflict"; key: string; existing: unknown; proposed: unknown }
+  | { kind: "out_of_area"; zip: string }
+  | null;
+
 export interface CaseRecord {
   id: string;
   tenantId: string;
@@ -77,6 +83,7 @@ export interface CaseRecord {
   workflowStatus: WorkflowStatus;
   safetyStatus: SafetyStatus;
   disposition: Disposition;
+  pendingAction: PendingAction;
   version: number;
   externalReference: string | null;
   diagnosticQuestionsAsked: number;

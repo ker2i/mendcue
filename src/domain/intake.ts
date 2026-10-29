@@ -1,10 +1,12 @@
 // Shared tenant-aware intake engine. Used by widget, hosted site, dashboard, API.
 import { randomUUID } from "node:crypto";
-import type { Assessment, CaseFact, CaseRecord, Message, TenantConfig } from "./types.js";
+import type { Assessment, CaseFact, CaseRecord, Message, PendingAction, TenantConfig } from "./types.js";
+import type { HazardHit } from "./safety.js";
 import { detectConflicts, isAllowedKey, isUnknownValue, normalizeFact } from "./facts.js";
 import { containsForbiddenAction, gasLeakScript, generalHazardScript, screenHazards } from "./safety.js";
 import { findAction, findQuestion, nextQuestion } from "./questions.js";
 import { normalizeModel, retrieveKnowledge, validateCitations } from "./knowledge.js";
+import { parseLabelText } from "./labelparse.js";
 import type { ModelProvider } from "../integrations/meta/provider.js";
 import { ModelFailure } from "../integrations/meta/provider.js";
 import type { Store } from "../db/store.js";
@@ -41,6 +43,7 @@ export async function createCase(
     id: newCaseId(), tenantId: tenant.id, reference: ref(), source,
     conversationPhase: "consent", workflowStatus: "draft",
     safetyStatus: "unchecked", disposition: "pending",
+    pendingAction: null,
     version: 1, externalReference, diagnosticQuestionsAsked: 0,
     modelMode: deps.provider.mode === "live" ? "live" : "fixture",
     createdAt: now, updatedAt: now, submittedAt: null,
@@ -65,6 +68,17 @@ function latestFacts(facts: CaseFact[]): Map<string, CaseFact> {
     m.set(f.key, f);
   }
   return m;
+}
+
+// Hazard types currently constraining questions/actions, from the latest
+// hazard event. Conservative: any unresolved safety state keeps exclusions.
+async function activeHazardTypes(store: Store, tenantId: string, caseId: string, safetyStatus: string): Promise<string[]> {
+  if (safetyStatus === "unchecked" || safetyStatus === "no_hazard_reported") return [];
+  const events = await store.listEvents(tenantId, caseId);
+  const flagged = [...events].reverse().find((e) => e.type === "hazard_flagged");
+  const hits = (flagged?.payload?.hits as Array<{ type?: string }> | undefined) ?? [];
+  const types = hits.map((h) => h.type).filter((t): t is string => typeof t === "string");
+  return types.length > 0 ? types : ["unknown_hazard"];
 }
 
 function summarizeForReview(tenant: TenantConfig, facts: Map<string, CaseFact>): string {
@@ -99,8 +113,130 @@ function fallbackExtract(text: string, messageId: string): Array<{ key: string; 
   return out;
 }
 
+// Shared hazard response. Called synchronously from the message route in
+// queued mode (before any job is enqueued) and from processTurn.
+export async function handleHazardTurn(
+  deps: EngineDeps, tenant: TenantConfig, c: CaseRecord, hits: HazardHit[]
+): Promise<TurnOutcome> {
+  const now = new Date().toISOString();
+  const gas = hits.find((h) => h.type === "gas_leak");
+  const reply = gas ? gasLeakScript(tenant.gasUtilityContact) : generalHazardScript(hits[0].type);
+  c.safetyStatus = gas ? "emergency" : "stop_use";
+  c.version += 1;
+  c.updatedAt = now;
+  await deps.store.updateCase(c);
+  await persistAssistant(deps.store, tenant.id, c, reply);
+  await deps.store.addEvent({
+    id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "hazard_flagged",
+    payload: { hits }, createdAt: now,
+  });
+  return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded: [], conflicts: [], questionId: null, actionId: null, modelMode: c.modelMode };
+}
+
+const AFFIRMATIVE = /^(yes|yeah|yep|yup|correct|that'?s right|confirmed|right|ok|okay|sure)\b/i;
+const NEGATIVE = /^(no|nope|wrong|not right|incorrect)\b/i;
+// Single-token model-like correction: alnum with digit, no spaces.
+const MODEL_LIKE = /^[A-Z0-9][A-Z0-9.\-/]{2,39}$/i;
+
+function isModelLikeCorrection(text: string): boolean {
+  const t = text.trim();
+  if (/\s/.test(t)) return false;
+  if (!MODEL_LIKE.test(t)) return false;
+  if (!/\d/.test(t)) return false;
+  // All-digit short tokens are ZIPs/quantities, not model corrections.
+  if (/^\d+$/.test(t) && t.length < 6) return false;
+  return true;
+}
+
+// Attempt to resolve the case's pending decision from this reply.
+// Returns a TurnOutcome when the reply resolves it, or null to continue
+// with the normal turn pipeline (pending state is retained).
+async function resolvePendingAction(
+  deps: EngineDeps, tenant: TenantConfig, c: CaseRecord,
+  messageId: string, text: string, current: Map<string, CaseFact>
+): Promise<TurnOutcome | null> {
+  const pending: PendingAction = c.pendingAction;
+  if (!pending) return null;
+  const store = deps.store;
+  const now = new Date().toISOString();
+  const done = async (reply: string, factsAdded: string[] = []): Promise<TurnOutcome> => {
+    c.pendingAction = null;
+    c.version += 1;
+    c.updatedAt = now;
+    await store.updateCase(c);
+    await persistAssistant(store, tenant.id, c, reply);
+    return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded, conflicts: [], questionId: null, actionId: null, modelMode: c.modelMode };
+  };
+
+  if (pending.kind === "model_confirm") {
+    if (AFFIRMATIVE.test(text.trim())) {
+      const cur = current.get("model_number");
+      if (cur) await store.markFactSuperseded(tenant.id, cur.id);
+      await addFact(store, tenant.id, c, { key: "model_number", value: pending.modelRaw, certainty: "explicit" }, messageId, null);
+      await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, messageId, null);
+      return done(`Thanks — model recorded as ${pending.modelRaw}.`, ["model_number", "model_confirmed"]);
+    }
+    if (NEGATIVE.test(text.trim())) {
+      return done(`No problem — please type the model number exactly as shown on the label, or say "label inaccessible" to continue without it.`);
+    }
+    if (isModelLikeCorrection(text)) {
+      const candidate = text.trim();
+      const cur = current.get("model_number");
+      if (cur) await store.markFactSuperseded(tenant.id, cur.id);
+      await addFact(store, tenant.id, c, { key: "model_number", value: candidate, certainty: "explicit" }, messageId, null);
+      await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, messageId, null);
+      return done(`Thanks — model recorded as ${candidate}.`, ["model_number", "model_confirmed"]);
+    }
+    return null; // Normal conversation; pending confirmation stays open.
+  }
+
+  if (pending.kind === "conflict") {
+    const t = text.trim().toLowerCase();
+    const existing = String(pending.existing ?? "").toLowerCase();
+    const proposed = String(pending.proposed ?? "").toLowerCase();
+    if (t === existing || (existing && t.includes(existing))) {
+      return done(`Got it — keeping ${pending.key} as "${pending.existing}".`);
+    }
+    if (t === proposed || (proposed && t.includes(proposed))) {
+      const cur = current.get(pending.key);
+      if (cur) await store.markFactSuperseded(tenant.id, cur.id);
+      await addFact(store, tenant.id, c, { key: pending.key, value: pending.proposed as string | number | boolean | null, certainty: "explicit" }, messageId, null, cur?.id ?? null);
+      return done(`Updated — ${pending.key} is now "${pending.proposed}". The earlier value is preserved in history.`, [pending.key]);
+    }
+    if (isModelLikeCorrection(text) && pending.key === "model_number") {
+      const cur = current.get(pending.key);
+      if (cur) await store.markFactSuperseded(tenant.id, cur.id);
+      await addFact(store, tenant.id, c, { key: pending.key, value: text.trim(), certainty: "explicit" }, messageId, null, cur?.id ?? null);
+      return done(`Updated — ${pending.key} is now "${text.trim()}".`, [pending.key]);
+    }
+    return null;
+  }
+
+  if (pending.kind === "out_of_area") {
+    if (/submit|summary|human|person/i.test(text)) {
+      await addFact(store, tenant.id, c, { key: "service_area_acknowledged", value: true, certainty: "explicit" }, messageId, null);
+      c.conversationPhase = "review";
+      const reply = summarizeForReview(tenant, current);
+      c.pendingAction = null;
+      c.version += 1;
+      c.updatedAt = now;
+      await store.updateCase(c);
+      await persistAssistant(store, tenant.id, c, reply);
+      return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded: ["service_area_acknowledged"], conflicts: [], questionId: null, actionId: null, modelMode: c.modelMode };
+    }
+    if (/^(yes|yeah|yep|sure|ok|okay|please|continue)\b/i.test(text.trim())) {
+      await addFact(store, tenant.id, c, { key: "service_area_acknowledged", value: true, certainty: "explicit" }, messageId, null);
+      return done(`Understood — I'll keep collecting details for a summary you can share with another provider, and you can ask for a person at any time.`, ["service_area_acknowledged"]);
+    }
+    return null;
+  }
+
+  return null;
+}
+
 export async function processTurn(
-  deps: EngineDeps, tenant: TenantConfig, caseId: string, messageId: string, text: string
+  deps: EngineDeps, tenant: TenantConfig, caseId: string, messageId: string, text: string,
+  opts: { consent?: boolean } = {}
 ): Promise<TurnOutcome> {
   const store = deps.store;
   const c = await store.getCase(tenant.id, caseId);
@@ -113,24 +249,36 @@ export async function processTurn(
   const current = latestFacts(facts);
   const asked = await askedIds(store, tenant.id, caseId);
 
-  // 1. Immediate deterministic hazard check — before any model call.
+  // 1. Immediate deterministic hazard check — before any model call,
+  // confirmation shortcut, or other branch. This is the ONLY entry point
+  // for customer turns, so no route can bypass it.
   const hits = screenHazards(text);
   if (hits.length > 0) {
-    const gas = hits.find((h) => h.type === "gas_leak");
-    const reply = gas ? gasLeakScript(tenant.gasUtilityContact) : generalHazardScript(hits[0].type);
-    c.safetyStatus = gas ? "emergency" : "stop_use";
-    c.version += 1;
-    c.updatedAt = now;
-    await store.updateCase(c);
-    await persistAssistant(store, tenant.id, c, reply);
-    await store.addEvent({
-      id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "hazard_flagged",
-      payload: { hits }, createdAt: now,
-    });
-    return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded: [], conflicts: [], questionId: null, actionId: null, modelMode: c.modelMode };
+    return handleHazardTurn(deps, tenant, c, hits);
   }
   if (c.safetyStatus === "unchecked") {
     c.safetyStatus = "no_hazard_reported";
+  }
+  // Hazard state stays active until an explicit transition. A customer
+  // "safe" report downgrades to needs_review for staff; it never clears.
+  if ((c.safetyStatus === "emergency" || c.safetyStatus === "stop_use") &&
+      /\b(i'?m safe|we'?re safe|all clear|no (longer|more) (danger|smell|smoke|sparking)|safe now)\b/i.test(text)) {
+    c.safetyStatus = "needs_review";
+    c.version += 1;
+    c.updatedAt = now;
+    await store.updateCase(c);
+    await store.addEvent({
+      id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "hazard_downgraded",
+      payload: { by: "customer_safe_report", to: "needs_review" }, createdAt: now,
+    });
+  }
+
+  // 1b. Resolve explicit pending decisions BEFORE normal extraction.
+  // Only affirmative/negation/valid-correction answers resolve a model
+  // confirmation; anything else falls through to normal conversation.
+  if (c.pendingAction) {
+    const resolved = await resolvePendingAction(deps, tenant, c, messageId, text, current);
+    if (resolved) return resolved;
   }
 
   // 2. Model extraction with graceful fallback.
@@ -140,14 +288,22 @@ export async function processTurn(
   let suggestedQuestionId: string | null = null;
   let suggestedActionId: string | null = null;
   try {
-    const allowedQ = (await import("./questions.js")).QUESTIONS.map((q) => q.id);
-    const allowedA = (await import("./questions.js")).CUSTOMER_ACTIONS
+    const qmod = await import("./questions.js");
+    const allowedQ = qmod.QUESTIONS.map((q) => q.id);
+    const allowedA = qmod.CUSTOMER_ACTIONS
       .filter((a) => a.reviewStatus === "approved").map((a) => a.action_id);
+    // Active question + recent turns so short answers resolve in context.
+    const events = await store.listEvents(tenant.id, c.id);
+    const lastAsked = [...events].reverse().find((e) => e.type === "question_asked");
+    const activeQ = lastAsked ? qmod.findQuestion(String(lastAsked.payload.questionId)) : undefined;
+    const history = await store.listMessages(tenant.id, c.id);
     const result = await deps.provider.extractIntakeTurn({
       tenantId: tenant.id, caseId: c.id, messageId, messageText: text,
       knownFacts: [...current.entries()].map(([key, f]) => ({ key, value: f.value })),
       askedQuestionIds: [...asked], allowedQuestionIds: allowedQ, allowedActionIds: allowedA,
       category: current.get("appliance_category") ? String(current.get("appliance_category")!.value) : null,
+      activeQuestion: activeQ ? { id: activeQ.id, text: activeQ.text } : null,
+      recentMessages: history.slice(-6).map((m) => ({ role: m.role, body: m.body.slice(0, 500) })),
     });
     proposed = result.proposedFacts.map((f) => ({ key: f.key, value: f.value, certainty: f.certainty }));
     if (result.handoffRequested) handoffRequested = true;
@@ -177,10 +333,14 @@ export async function processTurn(
     });
   }
 
-  // Consent: first customer message implies consent-to-process for the demo; record it.
+  // Consent: recorded exactly as the client sends it. The customer UI shows
+  // a processing disclosure with an explicit control; intake itself is never
+  // blocked (hazard reports must always get through), but an absent consent
+  // stays honestly unknown instead of being auto-recorded as given.
   if (c.conversationPhase === "consent" && !current.has("consent")) {
-    await addFact(store, tenant.id, c, { key: "consent", value: true, certainty: "explicit" }, messageId, null);
-    current.set("consent", { id: "consent", tenantId: tenant.id, caseId: c.id, key: "consent", value: true, status: "reported", sourceMessageId: messageId, sourceAttachmentId: null, certainty: "explicit", createdAt: now, supersedesId: null, confirmedBy: null, confirmedAt: null });
+    const consentValue = opts?.consent === true ? true : opts?.consent === false ? false : null;
+    const nf = await addFact(store, tenant.id, c, { key: "consent", value: consentValue, certainty: consentValue === null ? "uncertain" : "explicit" }, messageId, null);
+    current.set("consent", nf);
     c.conversationPhase = "identification";
   }
 
@@ -194,6 +354,7 @@ export async function processTurn(
       `I want to get this right: earlier you said ${con.key} was "${con.existing}", ` +
       `but now I understood "${con.proposed}". Which is correct?`;
     await persistAssistant(store, tenant.id, c, reply);
+    c.pendingAction = { kind: "conflict", key: con.key, existing: con.existing, proposed: con.proposed };
     c.version += 1;
     c.updatedAt = now;
     await store.updateCase(c);
@@ -209,6 +370,12 @@ export async function processTurn(
     current.set(p.key, nf);
     factsAdded.push(p.key);
   }
+  // A directly supplied model (or explicit confirmation) retires any stale
+  // label-confirmation prompt so a later "yes" can't revive old OCR text.
+  if (c.pendingAction?.kind === "model_confirm" &&
+      (factsAdded.includes("model_number") || factsAdded.includes("model_confirmed") || factsAdded.includes("label_inaccessible"))) {
+    c.pendingAction = null;
+  }
 
   // First substantive message becomes the complaint if none recorded.
   if (!current.has("problem_description") && text.trim().length > 0) {
@@ -217,14 +384,16 @@ export async function processTurn(
     factsAdded.push("problem_description");
   }
 
-  // 4. Service-area check.
+  // 4. Service-area check (skipped once the customer acknowledges it).
   const zip = current.get("service_zip");
-  if (zip && tenant.serviceZips && !tenant.serviceZips.includes(String(zip.value).slice(0, 5))) {
+  const acked = current.get("service_area_acknowledged")?.value === true;
+  if (zip && tenant.serviceZips && !tenant.serviceZips.includes(String(zip.value).slice(0, 5)) && !acked) {
     c.disposition = "out_of_service_area";
     const reply =
       `Thanks — ${zip.value} is outside our current service area for ${tenant.name}. ` +
       `I can still prepare a summary you can share with another provider, or you can ask for a person. ` +
       `Would you like me to continue collecting details?`;
+    c.pendingAction = { kind: "out_of_area", zip: String(zip.value) };
     c.version += 1;
     c.updatedAt = now;
     await store.updateCase(c);
@@ -232,8 +401,43 @@ export async function processTurn(
     return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded, conflicts, questionId: null, actionId: null, modelMode };
   }
 
-  // 5. Handoff request or review.
+  // 5. Handoff request or review. Text confirmation while already in
+  // review follows the same transition as the "Send request" button.
+  const submitIntent = /^(submit|send(\s+(it|my request|the request))?|confirm|yes[,.]?\s*(send|submit|please send))\.?$/i.test(text.trim());
   if (handoffRequested || text.trim().toLowerCase() === "submit") {
+    if (c.conversationPhase === "review" && submitIntent) {
+      try {
+        const { handoffVersion } = await submitCase(deps, tenant, c.id);
+        const submitted = await store.getCase(tenant.id, c.id);
+        const reply =
+          `Your request has been sent to ${tenant.name}. Your reference is ${submitted!.reference} ` +
+          `(handoff v${handoffVersion}). The ${tenant.routing.queue} will follow up. ` +
+          `Scheduling is confirmed by the service team, not by this chat.`;
+        await persistAssistant(store, tenant.id, submitted!, reply);
+        return { reply, phase: "submitted", safetyStatus: submitted!.safetyStatus, factsAdded, conflicts, questionId: null, actionId: null, modelMode };
+      } catch (e) {
+        if (e instanceof SubmitRejected) {
+          const reply =
+            e.code === "INCOMPLETE"
+              ? `Before I send this: ${e.message} Missing: ${e.missing.join(", ")}. ` +
+                `Reply with the missing details, or say "send incomplete" to send it as is.`
+              : e.message;
+          await persistAssistant(store, tenant.id, c, reply);
+          return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded, conflicts, questionId: null, actionId: null, modelMode };
+        }
+        throw e;
+      }
+    }
+    // "send incomplete" is the explicit incomplete route over text.
+    if (c.conversationPhase === "review" && /^send incomplete\.?$/i.test(text.trim())) {
+      const { handoffVersion } = await submitCase(deps, tenant, c.id, { acknowledgeIncomplete: true });
+      const submitted = await store.getCase(tenant.id, c.id);
+      const reply =
+        `Your request has been sent to ${tenant.name} as incomplete. Your reference is ${submitted!.reference} ` +
+        `(handoff v${handoffVersion}). The ${tenant.routing.queue} will follow up.`;
+      await persistAssistant(store, tenant.id, submitted!, reply);
+      return { reply, phase: "submitted", safetyStatus: submitted!.safetyStatus, factsAdded, conflicts, questionId: null, actionId: null, modelMode };
+    }
     c.conversationPhase = "review";
     c.disposition = c.disposition === "pending" ? "ready_for_review" : c.disposition;
     const reply = summarizeForReview(tenant, current);
@@ -245,18 +449,29 @@ export async function processTurn(
   }
 
   // 6. Next question: validate any suggested ID, else engine selection.
+  // Suggested IDs must satisfy everything the engine checks: existence,
+  // enabled version, category, preconditions, and hazard exclusions.
   const factKeys = new Set([...current.keys()]);
   const category = current.get("appliance_category") ? String(current.get("appliance_category")!.value) : null;
+  const activeHazards = await activeHazardTypes(store, tenant.id, c.id, c.safetyStatus);
+  const versionOk = (playbook: string, version: string): boolean => {
+    const want = tenant.playbookVersions[playbook];
+    if (!want) return true;
+    return want === version;
+  };
   let chosen = null as ReturnType<typeof findQuestion> | null;
   if (suggestedQuestionId) {
     const q = findQuestion(suggestedQuestionId);
     if (q && !asked.has(q.id) && !(q.factKey && factKeys.has(q.factKey)) &&
-        q.preconditions.every((p) => factKeys.has(p))) {
+        q.preconditions.every((p) => factKeys.has(p)) &&
+        (!q.categories || !category || q.categories.includes(category)) &&
+        !q.exclusions.some((e) => activeHazards.includes(e)) &&
+        versionOk(q.playbook, q.version)) {
       chosen = q;
     }
   }
   if (!chosen) {
-    chosen = nextQuestion({ factKeys, askedIds: asked, category, hazardTypes: [], diagnosticCount: c.diagnosticQuestionsAsked });
+    chosen = nextQuestion({ factKeys, askedIds: asked, category, hazardTypes: activeHazards, diagnosticCount: c.diagnosticQuestionsAsked, playbookVersions: tenant.playbookVersions });
   }
   if (!chosen) {
     c.conversationPhase = "review";
@@ -273,7 +488,10 @@ export async function processTurn(
   let actionId: string | null = null;
   if (suggestedActionId) {
     const a = findAction(suggestedActionId);
-    if (a && a.preconditions.every((p) => factKeys.has(p))) {
+    if (a && a.preconditions.every((p) => factKeys.has(p)) &&
+        (!a.categories || !category || a.categories.includes(category)) &&
+        !a.hazardExclusions.some((e) => activeHazards.includes(e)) &&
+        versionOk(a.playbook, a.version)) {
       actionText = `\n\nOptional safe check: ${a.instruction}`;
       actionId = a.action_id;
     }
@@ -359,6 +577,7 @@ export async function processLabelPhoto(
   let rawText = att.rawOcrText ?? "";
   let brand: string | null = null;
   let serial: string | null = null;
+  let providerModelRaw: string | null = null;
   let ambiguous = false;
   const uncertainty: string[] = [];
   if (!rawText) {
@@ -371,6 +590,7 @@ export async function processLabelPhoto(
       rawText = lr.rawText;
       brand = lr.brand;
       serial = lr.serialNumber;
+      providerModelRaw = lr.modelRaw;
       ambiguous = lr.ambiguousChars;
       uncertainty.push(...lr.uncertainty);
       await store.updateAttachmentOcr(tenant.id, attachmentId, rawText);
@@ -387,12 +607,20 @@ export async function processLabelPhoto(
     return { reply, modelRaw: null, confirmed: false, ambiguous: false };
   }
 
-  // Parse model candidate from raw text: longest alphanumeric token with a digit.
-  const tokens = rawText.match(/[A-Z0-9][A-Z0-9.\-/]{3,}/gi) ?? [];
-  const withDigit = tokens.filter((t) => /\d/.test(t));
-  withDigit.sort((a, b) => b.length - a.length);
-  const modelRaw = withDigit[0]?.trim() ?? null;
-  if (modelRaw && AMBIGUOUS_CHAR.test(modelRaw)) ambiguous = true;
+  // Structured provider fields win; otherwise label-aware parsing keeps the
+  // serial separate so it can never replace the model (R08).
+  let modelRaw: string | null = providerModelRaw;
+  let basis = "vision model field";
+  if (!modelRaw) {
+    const parsed = parseLabelText(rawText);
+    modelRaw = parsed.modelRaw;
+    if (parsed.serial && !serial) serial = parsed.serial;
+    if (parsed.ambiguous) ambiguous = true;
+    basis = parsed.basis;
+  } else if (AMBIGUOUS_CHAR.test(modelRaw)) {
+    ambiguous = true;
+  }
+  void basis;
 
   const facts = await store.listFacts(tenant.id, caseId);
   const current = latestFacts(facts);
@@ -418,6 +646,12 @@ export async function processLabelPhoto(
     id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "label_processed",
     payload: { attachmentId, modelRaw, ambiguous, uncertainty }, createdAt: now,
   });
+  if (modelRaw) {
+    c.pendingAction = { kind: "model_confirm", modelRaw, attachmentId };
+    c.version += 1;
+    c.updatedAt = now;
+    await store.updateCase(c);
+  }
 
   let reply: string;
   if (!modelRaw) {
@@ -431,46 +665,146 @@ export async function processLabelPhoto(
   return { reply, modelRaw, confirmed: false, ambiguous };
 }
 
-// Confirm a model number from the customer's reply ("yes" or a corrected value).
-export async function confirmModel(
-  deps: EngineDeps, tenant: TenantConfig, caseId: string, messageId: string, text: string
+// Explicit model confirmation from the label card (no free-text parsing).
+// decision "yes" confirms the pending OCR value; "correction" supplies an
+// edited value; "no" clears the prompt. Anything else is rejected — callers
+// must send other replies through the normal message pipeline.
+export async function confirmModelExplicit(
+  deps: EngineDeps, tenant: TenantConfig, caseId: string,
+  decision: { confirm: boolean; correctedModel?: string }
 ): Promise<{ confirmed: boolean; model: string | null }> {
   const store = deps.store;
   const c = await store.getCase(tenant.id, caseId);
   if (!c) throw new Error("case not found");
+  const pending = c.pendingAction;
+  if (!pending || pending.kind !== "model_confirm") return { confirmed: false, model: null };
   const facts = await store.listFacts(tenant.id, caseId);
   const current = latestFacts(facts);
-  const raw = current.get("model_number_raw")?.value ?? current.get("model_number")?.value;
-  if (!raw) return { confirmed: false, model: null };
-  const lower = text.trim().toLowerCase();
-  if (/^(yes|yeah|yep|correct|that's right|confirmed)\b/.test(lower)) {
-    if (current.get("model_number")) await store.markFactSuperseded(tenant.id, current.get("model_number")!.id);
-    await addFact(store, tenant.id, c, { key: "model_number", value: String(raw), certainty: "explicit" }, messageId, null);
-    await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, messageId, null);
-    return { confirmed: true, model: String(raw) };
+  const now = new Date().toISOString();
+  if (!decision.confirm) {
+    c.pendingAction = null;
+    c.version += 1;
+    c.updatedAt = now;
+    await store.updateCase(c);
+    return { confirmed: false, model: null };
   }
-  // A typed correction replaces the model (verbatim, suffixes preserved).
-  const candidate = text.trim().slice(0, 120);
-  if (candidate.length >= 3 && /[A-Z0-9]/i.test(candidate)) {
-    if (current.get("model_number")) await store.markFactSuperseded(tenant.id, current.get("model_number")!.id);
-    await addFact(store, tenant.id, c, { key: "model_number", value: candidate, certainty: "explicit" }, messageId, null);
-    await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, messageId, null);
-    return { confirmed: true, model: candidate };
+  const candidate = (decision.correctedModel ?? pending.modelRaw).trim().slice(0, 120);
+  if (!isModelLikeCorrection(candidate) && candidate !== pending.modelRaw) {
+    return { confirmed: false, model: null };
   }
-  return { confirmed: false, model: null };
+  if (current.get("model_number")) await store.markFactSuperseded(tenant.id, current.get("model_number")!.id);
+  await addFact(store, tenant.id, c, { key: "model_number", value: candidate, certainty: "explicit" }, null, pending.attachmentId);
+  await addFact(store, tenant.id, c, { key: "model_confirmed", value: true, certainty: "explicit" }, null, pending.attachmentId);
+  c.pendingAction = null;
+  c.version += 1;
+  c.updatedAt = now;
+  await store.updateCase(c);
+  await store.addEvent({
+    id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "model_confirmed",
+    payload: { model: candidate, attachmentId: pending.attachmentId }, createdAt: now,
+  });
+  return { confirmed: true, model: candidate };
 }
 
 // ---- Submission + handoff ----
+export class SubmitRejected extends Error {
+  code: "REVIEW_REQUIRED" | "INCOMPLETE";
+  missing: string[];
+  constructor(code: "REVIEW_REQUIRED" | "INCOMPLETE", missing: string[], message: string) {
+    super(message);
+    this.name = "SubmitRejected";
+    this.code = code;
+    this.missing = missing;
+  }
+}
+
+export interface ReviewSection {
+  id: string;
+  title: string;
+  rows: Array<{ key: string; label: string; value: string | number | boolean | null; missing: boolean; editable: boolean }>;
+}
+
+export interface ReviewState {
+  phase: string;
+  businessName: string;
+  queue: string;
+  sections: ReviewSection[];
+  missing: string[];
+  requiresIncompleteAck: boolean;
+  hazardRoute: boolean;
+}
+
+const REVIEW_ROWS: Array<{ section: string; title: string; key: string; label: string }> = [
+  { section: "appliance", title: "Appliance", key: "appliance_category", label: "Category" },
+  { section: "appliance", title: "Appliance", key: "brand", label: "Brand" },
+  { section: "appliance", title: "Appliance", key: "model_number", label: "Model" },
+  { section: "appliance", title: "Appliance", key: "model_confirmed", label: "Identification confirmed" },
+  { section: "appliance", title: "Appliance", key: "appliance_age", label: "Age" },
+  { section: "issue", title: "Reported issue", key: "problem_description", label: "Description" },
+  { section: "issue", title: "Reported issue", key: "error_code", label: "Error code (verbatim)" },
+  { section: "issue", title: "Reported issue", key: "display_reading", label: "Display reading" },
+  { section: "issue", title: "Reported issue", key: "failure_stage", label: "When it happens" },
+  { section: "observations", title: "Observations", key: "cooling_scope", label: "Cooling scope" },
+  { section: "observations", title: "Observations", key: "sound_observation", label: "Sounds" },
+  { section: "observations", title: "Observations", key: "leak_observation", label: "Leak / ice" },
+  { section: "observations", title: "Observations", key: "drain_observation", label: "Drainage" },
+  { section: "observations", title: "Observations", key: "load_observation", label: "Load" },
+  { section: "location", title: "Location and contact", key: "service_zip", label: "Service ZIP" },
+  { section: "location", title: "Location and contact", key: "street_address", label: "Street address" },
+  { section: "location", title: "Location and contact", key: "contact_name", label: "Name" },
+  { section: "location", title: "Location and contact", key: "contact_channel", label: "Phone or email" },
+  { section: "preferences", title: "Preferences", key: "preferred_window", label: "Callback / visit window" },
+];
+
+export function buildReview(tenant: TenantConfig, facts: CaseFact[], phase: string, safetyStatus: string): ReviewState {
+  const current = latestFacts(facts);
+  const sections = new Map<string, ReviewSection>();
+  for (const r of REVIEW_ROWS) {
+    if (!sections.has(r.section)) sections.set(r.section, { id: r.section, title: r.title, rows: [] });
+    const f = current.get(r.key);
+    sections.get(r.section)!.rows.push({
+      key: r.key, label: r.label,
+      value: f ? f.value : null,
+      missing: !f || f.value === null,
+      editable: true,
+    });
+  }
+  const missing = tenant.requiredFields.filter((k) => {
+    const f = current.get(k);
+    return !f || f.value === null;
+  });
+  const hazardRoute = ["emergency", "stop_use", "needs_review"].includes(safetyStatus);
+  return {
+    phase, businessName: tenant.name, queue: tenant.routing.queue,
+    sections: [...sections.values()], missing,
+    requiresIncompleteAck: missing.length > 0 && !hazardRoute,
+    hazardRoute,
+  };
+}
+
 export async function submitCase(
-  deps: EngineDeps, tenant: TenantConfig, caseId: string
+  deps: EngineDeps, tenant: TenantConfig, caseId: string,
+  opts: { acknowledgeIncomplete?: boolean } = {}
 ): Promise<{ handoffVersion: number; assessment: Assessment }> {
   const store = deps.store;
   const c = await store.getCase(tenant.id, caseId);
   if (!c) throw new Error("case not found");
   if (c.conversationPhase === "submitted") throw new Error("already submitted");
-  const now = new Date().toISOString();
   const facts = (await store.listFacts(tenant.id, caseId)).filter((f) => f.status !== "superseded");
   const byKey = new Map(facts.map((f) => [f.key, f]));
+  const missingRequired = tenant.requiredFields.filter((k) => !byKey.has(k));
+  const hazardRoute = ["emergency", "stop_use", "needs_review"].includes(c.safetyStatus);
+  // Ordinary requests must pass through review; an empty case can never be
+  // submitted by accident. Hazard cases take the explicit emergency route.
+  const hasContent = byKey.has("problem_description") || facts.length > 0;
+  if (c.conversationPhase !== "review" && (!hazardRoute || !hasContent)) {
+    throw new SubmitRejected("REVIEW_REQUIRED", missingRequired, "Please review your details before sending the request.");
+  }
+  if (missingRequired.length > 0 && !hazardRoute && !opts.acknowledgeIncomplete) {
+    throw new SubmitRejected("INCOMPLETE", missingRequired, "Some required details are missing. Confirm you want to send an incomplete request.");
+  }
+  const now = new Date().toISOString();
+  const incompleteAcknowledged = missingRequired.length > 0 && !hazardRoute && opts.acknowledgeIncomplete === true;
 
   // Retrieval for assessment (approved docs only, tenant-isolated).
   const docs = await store.listDocuments(tenant.id);
@@ -531,7 +865,6 @@ export async function submitCase(
   const version = existing.length + 1;
   const messages = await store.listMessages(tenant.id, caseId);
   const atts = await store.listAttachments(tenant.id, caseId);
-  const missingRequired = tenant.requiredFields.filter((k) => !byKey.has(k));
   const snapshot = {
     case_reference: c.reference,
     submitted_at: now,
@@ -559,6 +892,8 @@ export async function submitCase(
     knowledge_level: assessment.knowledgeLevel,
     citations: assessment.citations,
     missing_information: missingRequired,
+    incomplete_acknowledged: incompleteAcknowledged,
+    hazard_route: hazardRoute,
     preferred_window: byKey.get("preferred_window")?.value ?? null,
     recommended_follow_up: assessment.recommendedFollowUp,
     attachments: atts.map((a) => ({ id: a.id, kind: a.kind, mime: a.mimeType, sha256: a.sha256 })),
@@ -578,7 +913,11 @@ export async function submitCase(
     id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "case_submitted",
     payload: { handoffVersion: version }, createdAt: now,
   });
-  // Transactional outbox: enqueue webhook fan-out with the submission.
+  // Outbox enqueue for webhook fan-out. NOTE (R13, remaining work): this is a
+  // separate write after the handoff commit, not a single atomic transaction,
+  // and each delivery attempt currently mints a fresh event ID. Receivers
+  // must treat delivery as at-least-once; stable event identity and a real
+  // available_at backoff are still to be implemented.
   await store.enqueueJob({
     id: randomUUID(), tenantId: tenant.id, caseId: c.id, kind: "webhook",
     payload: { eventType: "case.submitted", handoffVersion: version },

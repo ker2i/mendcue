@@ -7,11 +7,12 @@ import { z } from "zod";
 import type { Store } from "../db/store.js";
 import type { ModelProvider } from "../integrations/meta/provider.js";
 import type { StorageAdapter } from "../integrations/storage/storage.js";
-import { detectImageMime } from "../integrations/storage/storage.js";
+import { detectImageMime, stripJpegMetadata } from "../integrations/storage/storage.js";
 import { errorBody, type TenantConfig } from "../domain/types.js";
 import { bearerFrom, csrfToken, newBootstrapCode, newToken, rateLimit, requestId, sha256 } from "./auth.js";
-import { confirmModel, createCase, processLabelPhoto, processTurn, submitCase } from "../domain/intake.js";
-import { validateEndpointUrl } from "../integrations/webhooks/sign.js";
+import { patchAsyncErrors } from "./asyncErrors.js";
+import { buildReview, confirmModelExplicit, createCase, handleHazardTurn, processLabelPhoto, processTurn, submitCase, SubmitRejected } from "../domain/intake.js";
+import { screenHazards } from "../domain/safety.js";
 
 export interface AppDeps {
   store: Store;
@@ -31,13 +32,56 @@ function syncTurns(): boolean {
 
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
+  patchAsyncErrors(app);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "256kb" }));
   app.use(cookieParser());
 
-  // ---- health ----
-  app.get("/healthz", (_req, res) => {
-    res.json({ ok: true, provider: deps.provider.mode, time: new Date().toISOString() });
+  const baseOrigin = (() => { try { return new URL(deps.baseUrl).origin; } catch { return ""; } })();
+
+  // Tenant-aware CORS for the customer-facing public API only (host-page
+  // session creation and widget config). Staff and integration APIs stay
+  // same-origin: no CORS headers are emitted for them.
+  async function originAllowed(origin: string): Promise<boolean> {
+    if (!origin) return false;
+    if (origin === baseOrigin) return true;
+    const tenants = await deps.store.listTenants();
+    return tenants.some((t) => t.allowedOrigins.includes(origin));
+  }
+  app.use("/api/v1/public", async (req, res, next) => {
+    const origin = String(req.headers.origin ?? "");
+    if (origin && (await originAllowed(origin))) {
+      res.setHeader("access-control-allow-origin", origin);
+      res.setHeader("vary", "origin");
+      res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+      res.setHeader("access-control-allow-headers", "content-type");
+      res.setHeader("access-control-max-age", "600");
+    }
+    if (req.method === "OPTIONS") {
+      if (origin && (await originAllowed(origin))) return res.status(204).end();
+      return res.status(403).json(errorBody("ORIGIN_NOT_ALLOWED", "This website is not enabled for intake.", requestId()));
+    }
+    next();
+  });
+
+  // ---- health/readiness: checks the database and reports queue state.
+  // A 200 means the web process can serve; worker liveness is reported by
+  // the worker container healthcheck in Compose.
+  app.get("/healthz", async (_req, res) => {
+    try {
+      const tenants = await deps.store.listTenants();
+      res.json({
+        ok: true, provider: deps.provider.mode,
+        database: "reachable", tenants: tenants.length,
+        time: new Date().toISOString(),
+      });
+    } catch (e) {
+      res.status(503).json({
+        ok: false, provider: deps.provider.mode, database: "unreachable",
+        detail: e instanceof Error ? e.message : "db error",
+        time: new Date().toISOString(),
+      });
+    }
   });
 
   // ---- public widget config ----
@@ -65,9 +109,11 @@ export function createApp(deps: AppDeps): express.Express {
     if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "Invalid session request.", rid));
     const t = await deps.store.getTenantByPublicKey(parsed.data.publicKey);
     if (!t) return res.status(404).json(errorBody("NOT_FOUND", "Unknown organization key.", rid));
-    // Origin check for browser embeds.
+    // Origin check for browser embeds. The platform's own hosted origin is
+    // always allowed (hosted business sites); external origins must be on
+    // the tenant's allowlist.
     const origin = String(req.headers.origin ?? "");
-    if (origin && !t.allowedOrigins.includes(origin)) {
+    if (origin && origin !== baseOrigin && !t.allowedOrigins.includes(origin)) {
       return res.status(403).json(errorBody("ORIGIN_NOT_ALLOWED", "This website is not enabled for intake.", rid));
     }
     const ip = String(req.ip ?? "unknown");
@@ -78,14 +124,16 @@ export function createApp(deps: AppDeps): express.Express {
     const code = newBootstrapCode();
     const token = newToken("ct");
     const now = new Date().toISOString();
+    // Bootstrap codes are short-lived (10 min) and single-use; the exchanged
+    // case token below lives 24h and is the resumable capability.
     await deps.store.createSession({
       id: randomUUID(), tenantId: t.id, caseId: c.id,
       tokenHash: sha256(token), bootstrapCodeHash: sha256(code), bootstrapUsed: false,
-      createdAt: now, expiresAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
+      createdAt: now, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     });
     res.status(201).json({
       caseId: c.id, reference: c.reference, bootstrapCode: code,
-      iframeUrl: `${deps.baseUrl}/embed?tenant=${encodeURIComponent(t.slug)}`,
+      iframeUrl: `${deps.baseUrl}/embed?tenant=${encodeURIComponent(t.slug)}&pk=${encodeURIComponent(t.publicKey)}`,
       openingMessage: t.openingMessage, privacyText: t.privacyText,
       // Token is delivered to the test client directly; browsers must use /sessions/exchange.
       _devToken: process.env.NODE_ENV === "test" ? token : undefined,
@@ -98,9 +146,9 @@ export function createApp(deps: AppDeps): express.Express {
     const schema = z.object({ code: z.string().min(8) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "Invalid code.", rid));
-    const s = await deps.store.getSessionByBootstrapHash(sha256(parsed.data.code));
-    if (!s || s.bootstrapUsed) return res.status(401).json(errorBody("UNAUTHORIZED", "Invalid or used code.", rid));
-    await deps.store.markBootstrapUsed(s.id);
+    // Atomic single-use consume: expired, used, and concurrent codes fail.
+    const s = await deps.store.consumeBootstrap(sha256(parsed.data.code), new Date().toISOString());
+    if (!s) return res.status(401).json(errorBody("UNAUTHORIZED", "Invalid, expired, or already-used code.", rid));
     // Issue the case token: we stored only its hash, so mint a fresh one here.
     const token = newToken("ct");
     const now = new Date().toISOString();
@@ -172,7 +220,7 @@ export function createApp(deps: AppDeps): express.Express {
   app.post("/api/v1/cases/:caseId/messages", caseAuth, async (req, res) => {
     const rid = requestId();
     const { tenant, session } = getCtx(req);
-    const schema = z.object({ body: z.string().min(1).max(4000) });
+    const schema = z.object({ body: z.string().min(1).max(4000), consent: z.boolean().optional() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "Message body required (1–4000 chars).", rid));
     const idem = String(req.headers["idempotency-key"] ?? "");
@@ -190,35 +238,29 @@ export function createApp(deps: AppDeps): express.Express {
     await deps.store.addMessage(msg);
     const engine = { store: deps.store, provider: deps.provider, storageGet: (k: string) => deps.storage.get(k) };
 
-    // Model-confirmation shortcut: if the last assistant message asked for confirmation
-    // and the customer answers yes/correction, confirm before the normal turn.
-    const history = await deps.store.listMessages(tenant.id, c.id);
-    const lastAssistant = [...history].reverse().find((m) => m.role === "assistant");
-    if (lastAssistant && /is that correct|confirm the exact model/i.test(lastAssistant.body)) {
-      const conf = await confirmModel(engine, tenant, c.id, msg.id, parsed.data.body);
-      if (conf.confirmed) {
-        const reply = `Thanks — model recorded as ${conf.model}.`;
-        await deps.store.addMessage({ id: randomUUID(), tenantId: tenant.id, caseId: c.id, role: "assistant", body: reply, createdAt: new Date().toISOString() });
-        const payload = { reply, confirmed: true, model: conf.model };
-        if (idem) await deps.store.idempotencyPut(tenant.id, `msg:${session.caseId}:${idem}`, JSON.stringify(payload));
-        return res.status(201).json(payload);
-      }
-    }
-
     if (syncTurns()) {
-      const outcome = await processTurn(engine, tenant, c.id, msg.id, parsed.data.body);
+      // processTurn screens hazards first; no route shortcut may bypass it.
+      const outcome = await processTurn(engine, tenant, c.id, msg.id, parsed.data.body, { consent: parsed.data.consent });
       const payload = { ...outcome, messageId: msg.id };
       if (idem) await deps.store.idempotencyPut(tenant.id, `msg:${session.caseId}:${idem}`, JSON.stringify(payload));
       return res.status(201).json(payload);
     }
-    // Queued mode: one normal turn job per case.
-    if (!(await deps.store.hasPendingTurnJob(c.id))) {
-      await deps.store.enqueueJob({
-        id: randomUUID(), tenantId: tenant.id, caseId: c.id, kind: "turn",
-        payload: { messageId: msg.id }, status: "pending", attempts: 0, maxAttempts: 3,
-        leaseUntil: null, lastError: null, createdAt: now, updatedAt: now,
-      });
+    // Queued mode: screen hazards synchronously BEFORE enqueueing, so a
+    // hazard is never queued as a normal turn and never waits on a worker.
+    const hits = screenHazards(parsed.data.body);
+    if (hits.length > 0) {
+      const outcome = await handleHazardTurn(engine, tenant, c, hits);
+      const payload = { ...outcome, messageId: msg.id };
+      if (idem) await deps.store.idempotencyPut(tenant.id, `msg:${session.caseId}:${idem}`, JSON.stringify(payload));
+      return res.status(201).json(payload);
     }
+    // Queued mode: one job per message; the worker serializes per case in
+    // FIFO order, so no message is ever dropped or double-processed.
+    await deps.store.enqueueJob({
+      id: randomUUID(), tenantId: tenant.id, caseId: c.id, kind: "turn",
+      payload: { messageId: msg.id, consent: parsed.data.consent ?? null }, status: "pending", attempts: 0, maxAttempts: 10,
+      leaseUntil: null, lastError: null, createdAt: now, updatedAt: now,
+    });
     res.status(202).json({ accepted: true, messageId: msg.id, status: "processing" });
   });
 
@@ -243,15 +285,18 @@ export function createApp(deps: AppDeps): express.Express {
     if (!real || !["image/jpeg", "image/png", "image/webp"].includes(real)) {
       return res.status(415).json(errorBody("UNSUPPORTED_MEDIA", "Accepted: JPEG, PNG, WebP. If your photo is HEIC, please re-save or screenshot it as JPEG/PNG and retry.", rid));
     }
-    const stored = await deps.storage.put(session.caseId, file.originalname || "photo", file.buffer, real);
+    const sanitized = real === "image/jpeg" ? stripJpegMetadata(file.buffer) : file.buffer;
+    const stored = await deps.storage.put(session.caseId, file.originalname || "photo", sanitized, real);
     const att = {
       id: randomUUID(), tenantId: tenant.id, caseId: session.caseId,
       kind: kind as "label_photo" | "error_display" | "other",
       mimeType: real, sizeBytes: stored.sizeBytes, storageKey: stored.storageKey,
       sha256: stored.sha256, rawOcrText: null as string | null, createdAt: new Date().toISOString(),
     };
-    // Test hook: clients may supply known label text for deterministic parsing.
-    if (typeof req.body?.labelText === "string" && req.body.labelText.length > 0 && req.body.labelText.length <= 2000) {
+    // Test-only hook: deterministic OCR text for parsing tests. Disabled in
+    // every other environment — production labels go through vision OCR.
+    if (process.env.NODE_ENV === "test" && typeof req.body?.labelText === "string" &&
+        req.body.labelText.length > 0 && req.body.labelText.length <= 2000) {
       att.rawOcrText = String(req.body.labelText);
     }
     await deps.store.addAttachment(att);
@@ -259,6 +304,15 @@ export function createApp(deps: AppDeps): express.Express {
     if (kind === "label_photo" && syncTurns()) {
       const outcome = await processLabelPhoto(engine, tenant, session.caseId, att.id);
       return res.status(201).json({ attachmentId: att.id, ...outcome });
+    }
+    if (kind === "label_photo") {
+      const now = new Date().toISOString();
+      await deps.store.enqueueJob({
+        id: randomUUID(), tenantId: tenant.id, caseId: session.caseId, kind: "label",
+        payload: { attachmentId: att.id }, status: "pending", attempts: 0, maxAttempts: 5,
+        leaseUntil: null, lastError: null, createdAt: now, updatedAt: now,
+      });
+      return res.status(202).json({ attachmentId: att.id, reply: "Photo received — reading the label.", status: "processing" });
     }
     res.status(201).json({ attachmentId: att.id, reply: "Photo received and stored privately." });
   });
@@ -304,6 +358,23 @@ export function createApp(deps: AppDeps): express.Express {
     res.json({ ok: true, version: c.version });
   });
 
+  // ---- explicit model confirmation (label card action; no text parsing) ----
+  app.post("/api/v1/cases/:caseId/confirm-model", caseAuth, async (req, res) => {
+    const rid = requestId();
+    const { tenant, session } = getCtx(req);
+    const schema = z.object({ confirm: z.boolean(), correctedModel: z.string().max(120).nullish() });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(errorBody("VALIDATION_ERROR", "confirm (boolean) required.", rid));
+    const engine = { store: deps.store, provider: deps.provider, storageGet: (k: string) => deps.storage.get(k) };
+    const result = await confirmModelExplicit(engine, tenant, session.caseId, {
+      confirm: parsed.data.confirm, correctedModel: parsed.data.correctedModel ?? undefined,
+    });
+    if (!result.confirmed && parsed.data.confirm) {
+      return res.status(400).json(errorBody("VALIDATION_ERROR", "No pending model confirmation, or the corrected value is not a valid model number.", rid));
+    }
+    res.json(result);
+  });
+
   // ---- submit ----
   app.post("/api/v1/cases/:caseId/submit", caseAuth, async (req, res) => {
     const rid = requestId();
@@ -315,16 +386,30 @@ export function createApp(deps: AppDeps): express.Express {
     }
     try {
       const engine = { store: deps.store, provider: deps.provider, storageGet: (k: string) => deps.storage.get(k) };
-      const result = await submitCase(engine, tenant, session.caseId);
+      const ack = (req.body as { acknowledgeIncomplete?: boolean } | undefined)?.acknowledgeIncomplete === true;
+      const result = await submitCase(engine, tenant, session.caseId, { acknowledgeIncomplete: ack });
       const c = await deps.store.getCase(tenant.id, session.caseId);
       const payload = { reference: c!.reference, handoffVersion: result.handoffVersion, assessmentStatus: result.assessment.status };
       if (idem) await deps.store.idempotencyPut(tenant.id, `submit:${session.caseId}:${idem}`, JSON.stringify(payload));
       res.status(201).json(payload);
     } catch (e) {
+      if (e instanceof SubmitRejected) {
+        return res.status(400).json({ error: { code: e.code, message: e.message, request_id: rid }, missing: e.missing });
+      }
       const msg = e instanceof Error ? e.message : "submit failed";
       if (msg === "already submitted") return res.status(400).json(errorBody("VALIDATION_ERROR", "Already submitted.", rid));
       throw e;
     }
+  });
+
+  // ---- structured review state ----
+  app.get("/api/v1/cases/:caseId/review", caseAuth, async (req, res) => {
+    const rid = requestId();
+    const { tenant, session } = getCtx(req);
+    const c = await deps.store.getCase(tenant.id, session.caseId);
+    if (!c) return res.status(404).json(errorBody("NOT_FOUND", "Case not found.", rid));
+    const facts = await deps.store.listFacts(tenant.id, c.id);
+    res.json(buildReview(tenant, facts, c.conversationPhase, c.safetyStatus));
   });
 
   // ---- request human ----

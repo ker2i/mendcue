@@ -24,7 +24,6 @@ describe("worker", () => {
       payload: { messageId: msgId }, status: "pending", attempts: 0, maxAttempts: 3,
       leaseUntil: null, lastError: null, createdAt: now, updatedAt: now,
     });
-    expect(await store.hasPendingTurnJob(c.id)).toBe(true);
     const did = await processOneJob(deps);
     expect(did).toBe(true);
     const messages = await store.listMessages(tenant.id, c.id);

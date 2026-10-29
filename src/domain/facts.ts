@@ -24,6 +24,7 @@ export const FACT_KEYS = [
   "contact_name",
   "contact_channel",
   "preferred_window",
+  "service_area_acknowledged",
   "consent",
 ] as const;
 

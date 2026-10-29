@@ -22,6 +22,14 @@ export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
     if (job.kind === "turn" && job.caseId) {
       const tenant = await deps.store.getTenant(job.tenantId);
       if (!tenant) throw new Error("unknown tenant");
+      // Serialize per case in FIFO order: defer while an older turn job for
+      // this case still needs processing. Every message keeps its own job,
+      // so nothing is dropped (R06).
+      if (await deps.store.olderTurnJobPending(job.caseId, job.createdAt, job.id)) {
+        const backoff = new Date(Date.now() + 2000).toISOString();
+        await deps.store.failJob(job.id, "deferred: older turn pending", backoff);
+        return true;
+      }
       // Recheck case state before committing generated output.
       const c = await deps.store.getCase(job.tenantId, job.caseId);
       if (!c) throw new Error("case gone");
@@ -33,16 +41,10 @@ export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
       const messages = await deps.store.listMessages(job.tenantId, job.caseId);
       const msg = messages.find((m) => m.id === messageId);
       if (!msg) throw new Error("message gone");
-      // Discard stale output if a newer customer message arrived after this one.
-      const idx = messages.findIndex((m) => m.id === messageId);
-      const newer = messages.slice(idx + 1).some((m) => m.role === "customer");
-      if (newer) {
-        await deps.store.completeJob(job.id);
-        return true;
-      }
+      const consent = typeof job.payload.consent === "boolean" ? job.payload.consent : undefined;
       await processTurn(
         { store: deps.store, provider: deps.provider, storageGet: (k) => deps.storage.get(k) },
-        tenant, job.caseId, messageId, msg.body
+        tenant, job.caseId, messageId, msg.body, { consent }
       );
     } else if (job.kind === "webhook" && job.caseId) {
       await deliverWebhooks(deps, job.tenantId, job.caseId, job.payload);
