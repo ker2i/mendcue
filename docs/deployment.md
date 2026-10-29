@@ -27,12 +27,17 @@ Services: `caddy` (TLS, only 80/443 public), `web`, `worker`
 (`SYNC_TURNS=0`, queued turns), `postgres` (private network, persistent
 volume). Media persists in the `mediadata` volume.
 
-Database roles: migration `002_rls.sql` creates an `app_runtime` role with
-row-level-security policies as defense-in-depth. The Compose file runs the
-app as the table owner for pilot simplicity (owner bypasses RLS), with
-tenant scoping enforced at the application layer on every query.
-Before live customer use, run migrations as the owner and switch the app's
-`DATABASE_URL` to the `app_runtime` role so RLS is effective.
+Database roles: web and worker connect as the restricted `app_runtime` role
+(migration `002_rls.sql`); row-level security is effective, with tenant
+scoping additionally enforced at the application layer on every query.
+Auth/session/worker bootstrap operations use the narrow `SECURITY DEFINER`
+functions from migration `004_auth_paths.sql` — the only pre-tenant-context
+paths. Migrations and seeding run as the table owner.
+
+Rotate credentials before live use: the migration creates `app_runtime`
+with a default password — change it with
+`ALTER ROLE app_runtime WITH PASSWORD '...'` and set the same value as
+`APP_RUNTIME_PASSWORD` in `.env`. Also change `POSTGRES_PASSWORD`.
 
 Set `MODEL_PROVIDER=live` and `MODEL_API_KEY` for real Meta calls
 (base `https://api.meta.ai/v1`, model `muse-spark-1.3`, Standard mode).
@@ -71,10 +76,15 @@ Implement deletion as a scheduled job before live customer use (pilot TODO).
 
 ## Cost controls
 
-- Bounded context, max 4 retrieved chunks, photo results reused.
-- `GLOBAL_AI_SPEND_LIMIT` (daily USD) is read by the worker; when exceeded,
-  turns fall back to deterministic intake (enforced in the spend-guard
-  release — currently log + fallback at the provider layer).
-- Track per-case token usage from provider responses; the illustrative
-  50k-in/5k-out case (~$0.084 at $1.25/$4.25 per M) must be replaced by
-  measured numbers. Recheck Meta pricing before launch.
+Current enforcement status: the application bounds context (recent messages,
+max 4 retrieved chunks, photo results reused) but does NOT enforce any
+spending limit and does NOT record token usage. There is no per-case,
+per-tenant, or global spend guard in this release.
+
+- Do not expose live-model traffic publicly without an external budget
+  control (provider-side cap or a proxying budget guard).
+- The illustrative 50k-in/5k-out case (~$0.084 at $1.25/$4.25 per M tokens)
+  is an estimate only. Measure real usage before quoting costs, and recheck
+  Meta pricing before launch.
+- `GLOBAL_AI_SPEND_LIMIT` in earlier templates is reserved for the future
+  spend guard; setting it currently has no effect.

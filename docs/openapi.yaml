@@ -120,15 +120,48 @@ paths:
       responses:
         '200': { description: Corrected }
         '409': { description: Version conflict }
+  /cases/{caseId}/review:
+    get:
+      summary: Structured review state with editable sections and missing info
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      responses:
+        '200': { description: Sections, missing fields, ack requirement }
+  /cases/{caseId}/confirm-model:
+    post:
+      summary: Explicit label confirmation from the confirmation card
+      security: [{ caseToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/CaseId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: boolean }
+                correctedModel: { type: string }
+      responses:
+        '200': { description: Confirmation result }
+        '400': { description: Nothing pending or invalid value }
   /cases/{caseId}/submit:
     post:
-      summary: Confirm handoff (explicit customer action)
+      summary: Send request (requires review; incomplete needs ack)
       security: [{ caseToken: [] }]
       parameters:
         - { $ref: '#/components/parameters/CaseId' }
         - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                acknowledgeIncomplete: { type: boolean }
       responses:
         '201': { description: Reference + handoff version }
+        '400': { description: REVIEW_REQUIRED or INCOMPLETE with missing list }
   /cases/{caseId}/request-human:
     post:
       summary: Request human assistance
@@ -163,10 +196,24 @@ paths:
         '200': { description: Inbox rows }
   /staff/cases/{caseId}:
     patch:
-      summary: Assignment and operational updates (CSRF + version)
+      summary: Assignment and operational updates (CSRF + version + role)
       parameters: [{ $ref: '#/components/parameters/CaseId' }]
       responses:
         '200': { description: Updated }
+        '403': { description: Read-only role }
+  /staff/cases/{caseId}/attachments/{attachmentId}:
+    get:
+      summary: View a case photo (staff session, audit-logged)
+      parameters:
+        - { $ref: '#/components/parameters/CaseId' }
+        - { in: path, name: attachmentId, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Image bytes }
+  /staff/settings:
+    get:
+      summary: Tenant settings, webhooks, credentials, knowledge coverage
+      responses:
+        '200': { description: Sanitized settings (no secrets) }
   /staff/cases/{caseId}/outcome:
     post:
       summary: Record repair outcome

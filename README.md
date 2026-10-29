@@ -11,12 +11,24 @@ business site, a staff dashboard, and a REST API.
 
 ## Quick start
 
+Two local modes. Pick one.
+
+**Mode A — single process, in-memory store (no database):**
+
 ```bash
-cp .env.example .env
 npm install
 npm test
 npm run build
-node dist/server/index.js
+PORT=3000 APP_BASE_URL=http://localhost:3000 MODEL_PROVIDER=fixture SYNC_TURNS=1 node dist/server/index.js
+```
+
+**Mode B — full stack with Postgres (Docker Compose):**
+
+```bash
+cp .env.example .env   # then edit .env: passwords, domain, keys
+docker compose build
+docker compose --profile seed up -d postgres migrate seed
+docker compose up -d
 ```
 
 - Hosted pilot site: http://localhost:3000/business/demo-phoenix-appliance
@@ -36,19 +48,24 @@ API mark it as such and never present it as a live model result.
 
 - `src/domain/` — intake engine, safety, questions/actions, knowledge, facts
 - `src/integrations/meta/` — provider contract, live Meta adapter, fixture
-- `src/server/` — API, staff/integration auth, pages (embed/hosted/staff)
+- `src/domain/` — intake engine, safety, questions/actions, knowledge, facts
+- `src/integrations/meta/` — provider contract, live Meta adapter, fixture
+- `src/server/` — API, staff/integration auth, page shells
+- `src/server/ui/` — shared CSS + dependency-free clients (widget, intake, staff, hosted)
 - `src/worker/` — durable job processing (turns, labels, webhooks)
 - `src/db/` — store interface, memory + Postgres implementations, migrations, seed
-- `migrations/` — SQL schema + RLS
-- `tests/` — intake, safety, isolation, labels/knowledge, fallback suites
+- `migrations/` — SQL schema, RLS, narrow auth paths, composite FKs
+- `tests/` — intake, safety, isolation, labels/knowledge, fallback, review regressions, PG integration
+- `scripts/browser-acceptance.mjs` — real-Chrome acceptance run (24 checks)
 - `docs/` — openapi, architecture, deployment, tenant-onboarding, evaluation
 - `examples/integration/` — mock webhook receiver + embed snippet
 
 ## Verification
 
 ```bash
-npm test          # unit + API suites (seeded memory store, fixture provider)
+npm test          # API + engine suites (memory store) + real-Postgres integration
 npm run typecheck
+npm run build && node scripts/browser-acceptance.mjs   # needs CHROME_BIN
 ```
 
 See `docs/evaluation.md` for the 12-scenario reviewed set and pilot grading.

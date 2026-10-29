@@ -21,10 +21,20 @@ Key files:
 - `src/integrations/meta/` — `provider.ts` contract, `meta.ts` live adapter,
   `fixture.ts` deterministic dev fixture (always labeled, never live).
 - `src/server/` — Express routes, staff/integration auth, pages.
-- `src/worker/` — leased job processing with retry/backoff.
+- `src/worker/` — leased job processing with retry/backoff; one job per
+  message, FIFO-serialized per case.
 - `src/db/` — `store.ts` interface, `memory.ts` (tests/dev), `pg.ts` (prod),
   `migrate.ts`, `seed.ts`.
-- `migrations/` — `001_init.sql` schema, `002_rls.sql` row-level security.
+- `migrations/` — schema, row-level security, narrow `SECURITY DEFINER`
+  auth/worker paths, composite tenant/case foreign keys.
+- `src/server/ui/` — shared CSS plus dependency-free clients served as
+  static assets under a restrictive CSP (widget loader, intake sheet,
+  staff workspace); all rendering is text-node based.
+
+Pending customer decisions (label confirmation, fact conflict, out-of-area)
+are explicit persisted case state, resolved only by affirmative, negative,
+or valid-correction answers. Hazard screening runs before every other
+branch on every turn path, including queued intake.
 
 ## Trust boundaries
 

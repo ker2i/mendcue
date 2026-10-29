@@ -54,3 +54,27 @@ Technician rates each handoff: useful as received / useful after corrections /
 needed substantial follow-up / misleading or unusable; records confirmed issue
 and whether hypotheses helped. Do not report accuracy or hours saved from
 synthetic runs — compare against a manual-intake baseline on real pilot cases.
+
+## Automated verification (2026-10-29)
+
+- `npm test`: 51 tests pass, including 6 against real PostgreSQL (PGlite)
+  under the restricted `app_runtime` role (migrations, RLS, composite FKs,
+  bootstrap consume-once, jobs, full intake).
+- `node scripts/browser-acceptance.mjs`: 24/24 checks pass in real
+  headless Chrome — hosted intake, genuine second-origin embed (separate
+  host), review/edit/submit, refresh recovery, hazard script, queued-mode
+  polling UI, phone layout, keyboard use, and an inert stored-markup check
+  on the staff inbox. Requires `npm run build` and `CHROME_BIN` pointing
+  at a chrome-headless-shell binary.
+
+## Not yet verified (remaining work)
+
+- Live Meta model calls (no key in this environment): adapter, schemas,
+  and refusal/timeout handling are implemented but unexercised against the
+  real API. The first live run must be a fixture-vs-live comparison on the
+  scenarios above, with cost measured, before any public live traffic.
+- R13 webhook exactly-once semantics (stable event identity, backoff
+  column, atomic outbox) — receivers must treat delivery as at-least-once.
+- Full Docker Compose boot with TLS (Compose file updated but not booted
+  here: the image registry is unreachable from this environment).
+- Technician grading on real pilot cases.

@@ -13,13 +13,18 @@ INSERT INTO tenants(id, slug, public_key, config) VALUES (
 
 Required config fields: name, orgType (`solo_repair` | `repair_company` |
 `home_warranty` | `insurance`), branding, contact, timezone (pilot:
-`America/Phoenix`), languages, allowedOrigins, publicKey, categories,
-detailedCategories (`refrigerator`, `washer`, `dishwasher` have detailed
-playbooks; others use the general path), serviceZips (or `null` for
+`America/Phoenix`), languages, allowedOrigins (EXTERNAL embed origins only —
+the platform's own hosted origin is always allowed at runtime), publicKey,
+categories, detailedCategories (`refrigerator`, `washer`, `dishwasher` have
+detailed playbooks; others use the general path), serviceZips (or `null` for
 unrestricted), requireStreetAddress, requiredFields, playbookVersions,
 routing, notifications, retention, privacyText, openingMessage,
 gasUtilityContact (per service area — e.g. Southwest Gas for Phoenix),
 featureFlags.
+
+Embed CORS: host-page session creation answers preflight only for the
+platform origin and the tenant's `allowedOrigins`. Staff and integration
+APIs emit no CORS headers (same-origin / server-to-server only).
 
 Org type changes default wording/routing only — never the implementation.
 

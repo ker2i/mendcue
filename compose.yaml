@@ -46,7 +46,7 @@ services:
         condition: service_completed_successfully
     env_file: [.env]
     environment:
-      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+      DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:-change_me_in_production}@postgres:5432/intake
       PORT: "3000"
     volumes:
       - mediadata:/data/media
@@ -65,17 +65,24 @@ services:
         condition: service_completed_successfully
     env_file: [.env]
     environment:
-      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+      DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:-change_me_in_production}@postgres:5432/intake
       SYNC_TURNS: "0"
     volumes:
       - mediadata:/data/media
     networks: [private]
     command: ["node", "dist/worker/index.js"]
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "dist/worker/index.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on: [web]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
     ports:
       - "80:80"
       - "443:443"
@@ -91,5 +98,7 @@ volumes:
 
 networks:
   public:
+  # NOTE: this network is deliberately NOT internal: the worker needs
+  # outbound egress for Meta API calls and webhook delivery. Postgres stays
+  # private by publishing no ports; only web/worker/migrate can reach it.
   private:
-    internal: true
