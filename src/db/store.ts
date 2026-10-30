@@ -32,6 +32,7 @@ export interface JobRecord {
   id: string; tenantId: string; caseId: string | null; kind: string;
   payload: Record<string, unknown>; status: "pending" | "leased" | "done" | "failed";
   attempts: number; maxAttempts: number; leaseUntil: string | null;
+  availableAt?: string; operatorRetries?: number; leaseVersion?: number;
   lastError: string | null; createdAt: string; updatedAt: string;
 }
 
@@ -43,7 +44,19 @@ export interface OutcomeRecord {
   hypothesesUseful: boolean | null; recordedBy: string; recordedAt: string;
 }
 
+export interface CaseCommit {
+  record: CaseRecord; expectedVersion: number; events: CaseEvent[]; jobs: JobRecord[];
+  handoff?: Handoff; assessment?: Assessment;
+}
+
 export interface Store {
+  // Compare-and-swap the case and commit its complete outbox in one transaction.
+  commitCase(change: CaseCommit): Promise<boolean>;
+  listJobs(tenantId: string): Promise<JobRecord[]>;
+  retryJob(tenantId: string, id: string): Promise<boolean>;
+  updateJobPayload(tenantId: string, id: string, payload: Record<string, unknown>): Promise<void>;
+
+  purgeExpired(tenant: TenantConfig, now: string): Promise<number>;
   // tenants
   getTenant(id: string): Promise<TenantConfig | null>;
   getTenantBySlug(slug: string): Promise<TenantConfig | null>;
@@ -94,8 +107,8 @@ export interface Store {
   // jobs (durable queue)
   enqueueJob(j: JobRecord): Promise<void>;
   leaseJob(now: string): Promise<JobRecord | null>;
-  completeJob(id: string): Promise<void>;
-  failJob(id: string, error: string, retryAt: string | null): Promise<void>;
+  completeJob(id: string, attempt?: number): Promise<void>;
+  failJob(id: string, error: string, retryAt: string | null, attempt?: number): Promise<void>;
   // True when an older turn job for the case still needs processing first.
   olderTurnJobPending(caseId: string, beforeCreatedAt: string, excludeId: string): Promise<boolean>;
 
@@ -107,7 +120,7 @@ export interface Store {
   saveEndpoint(e: WebhookEndpoint): Promise<void>;
   listEndpoints(tenantId: string): Promise<WebhookEndpoint[]>;
   saveDelivery(d: WebhookDelivery): Promise<void>;
-  listDeliveries(tenantId: string): Promise<WebhookDelivery[]>;
+  listDeliveries(tenantId: string, eventId?: string): Promise<WebhookDelivery[]>;
 
   // staff / service / outcomes
   saveStaffUser(u: StaffUser): Promise<void>;

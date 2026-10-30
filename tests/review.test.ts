@@ -7,8 +7,7 @@ import { join } from "node:path";
 import { say, startSession, testApp } from "./helpers.js";
 
 function pngBytes(): Buffer {
-  const head = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  return Buffer.concat([head, Buffer.alloc(64, 1)]);
+  return Buffer.from("iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAHUlEQVQokWP4TyJgGNVABGAgRhEyGNVADKB9KAEAr639H8LdEzEAAAAASUVORK5CYII=", "base64");
 }
 
 describe("R01 hazard during model confirmation", () => {

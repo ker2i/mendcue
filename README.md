@@ -41,8 +41,11 @@ docker compose up -d
 
 Live Meta calls: set `MODEL_PROVIDER=live` + `MODEL_API_KEY`
 (Standard mode, `muse-spark-1.3` at `https://api.meta.ai/v1`).
-Without a key the app uses a **labeled development fixture** — the UI and
-API mark it as such and never present it as a live model result.
+Choose `MODEL_PROVIDER=fixture` explicitly for a labeled development fixture.
+Live mode without a key fails startup. Web and worker share the same validated
+configuration; production requires durable SQL and private persistent media.
+See [deployment and operations](docs/deployment.md) for provisioning, SMTP, retries,
+retention, image budgets and backup/restore.
 
 ## Layout
 

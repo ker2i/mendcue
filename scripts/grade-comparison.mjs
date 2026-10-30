@@ -1,6 +1,7 @@
 // Validate human grades and export per-case JSON + CSV. No synthetic savings.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { z } from 'zod';
+import { dirname } from 'node:path';
 const schema=z.array(z.object({
   runId:z.string().min(1),kind:z.enum(['synthetic','real_anonymized']),label:z.enum(['A','B']),
   grade:z.enum(['useful_as_received','useful_after_corrections','needed_followup','misleading_or_unusable']),
@@ -10,6 +11,9 @@ const schema=z.array(z.object({
   unavailableFacts:z.array(z.string()),identificationCorrect:z.boolean().nullable(),
   documentationApplies:z.boolean().nullable(),reviewSeconds:z.number().nonnegative().nullable(),
   timingMethod:z.enum(['manual','measured','estimated','not_recorded']),
+  latencyMs:z.number().nonnegative().nullable().default(null),
+  inputTokens:z.number().int().nonnegative().nullable().default(null),outputTokens:z.number().int().nonnegative().nullable().default(null),
+  estimatedUsd:z.number().nonnegative().nullable().default(null),
   followupQuestions:z.number().int().nonnegative().nullable(),approvedBrief:z.string().nullable(),
 })).superRefine((rows,ctx)=>{
   const keys=new Set();for(const r of rows){const key=r.runId+':'+r.label;
@@ -19,6 +23,7 @@ const schema=z.array(z.object({
   }
 });
 const [file,out='data/grades-report']=process.argv.slice(2);if(!file)throw new Error('Usage: node scripts/grade-comparison.mjs private-grades.json [output-prefix]');
+mkdirSync(dirname(out),{recursive:true,mode:0o700});
 const grades=schema.parse(JSON.parse(readFileSync(file,'utf8')));
 const report={generatedAt:new Date().toISOString(),grades,groups:['synthetic','real_anonymized'].map(kind=>{
   const rows=grades.filter(r=>r.kind===kind);return {kind,gradedOutputs:rows.length,pairedRuns:[...new Set(rows.map(r=>r.runId))].filter(id=>rows.filter(r=>r.runId===id).length===2).length,
@@ -26,7 +31,7 @@ const report={generatedAt:new Date().toISOString(),grades,groups:['synthetic','r
     grades:Object.fromEntries(['useful_as_received','useful_after_corrections','needed_followup','misleading_or_unusable'].map(g=>[g,rows.filter(r=>r.grade===g).length]))};
 })};
 writeFileSync(out+'.json',JSON.stringify(report,null,2),{mode:0o600});
-const columns=['runId','kind','label','grade','reviewSeconds','timingMethod','followupQuestions','knownCriticalFactsExpected','knownCriticalFactsCaptured'];
+const columns=['runId','kind','label','grade','reviewSeconds','timingMethod','followupQuestions','knownCriticalFactsExpected','knownCriticalFactsCaptured','latencyMs','inputTokens','outputTokens','estimatedUsd'];
 const escape=value=>'"'+String(value??'').replaceAll('"','""')+'"';
 writeFileSync(out+'.csv',[columns.join(','),...grades.map(r=>columns.map(c=>escape(r[c])).join(','))].join('\n'),{mode:0o600});
 console.log('Exported human grades with explicit units, missing measurements and separate real/synthetic counts.');

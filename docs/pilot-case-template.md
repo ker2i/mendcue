@@ -32,3 +32,12 @@ For report export, add `kind`, `knownCriticalFactsExpected`,
 when unmeasured). Run `node scripts/grade-comparison.mjs data/grades.json`.
 The report preserves per-case rows and separate real/synthetic grade counts;
 it does not infer business improvements from grades.
+
+For the v2 complete-brief runner, replace the old `input` wrapper above with:
+`tenant` (the validated private tenant configuration), `facts` (same intake records),
+`documents` (approved immutable document metadata), `chunks` (full versioned chunks),
+and `images` (zero or one permitted local image path). Keep `kind` at the top level.
+The old wrapper applies only to `run-raw-comparison.mjs`. Complete-brief runs preserve
+actual submitted product snapshots and equivalent image inputs. Only actual recorded
+technician grades count as pilot evidence. Store exported grades as
+`PRIVATE_ARTIFACT_ROOT/TENANT-ID/RUN.grades.json`/`.grades.csv` for managed retention.

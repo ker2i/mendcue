@@ -127,6 +127,7 @@ export interface Attachment {
   sizeBytes: number;
   storageKey: string;
   sha256: string;
+  sourceSha256?: string;
   rawOcrText: string | null;
   createdAt: string;
 }

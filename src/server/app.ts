@@ -1,13 +1,16 @@
+import { sanitizeImage } from "../integrations/storage/images.js";
+import { ModelFailure } from "../integrations/meta/provider.js";
+import { MemoryStore } from "../db/memory.js";
 // Express application factory. All routes are tenant-scoped.
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import type { Store } from "../db/store.js";
 import type { ModelProvider } from "../integrations/meta/provider.js";
 import type { StorageAdapter } from "../integrations/storage/storage.js";
-import { detectImageMime, stripJpegMetadata } from "../integrations/storage/storage.js";
+import { detectImageMime } from "../integrations/storage/storage.js";
 import { errorBody, type TenantConfig } from "../domain/types.js";
 import { bearerFrom, csrfToken, newBootstrapCode, newToken, rateLimit, requestId, sha256 } from "./auth.js";
 import { patchAsyncErrors } from "./asyncErrors.js";
@@ -72,13 +75,12 @@ export function createApp(deps: AppDeps): express.Express {
       const tenants = await deps.store.listTenants();
       res.json({
         ok: true, provider: deps.provider.mode,
-        database: "reachable", tenants: tenants.length,
+        database: deps.store instanceof MemoryStore ? "memory" : "postgres", durable: !(deps.store instanceof MemoryStore), tenants: tenants.length,
         time: new Date().toISOString(),
       });
     } catch (e) {
       res.status(503).json({
         ok: false, provider: deps.provider.mode, database: "unreachable",
-        detail: e instanceof Error ? e.message : "db error",
         time: new Date().toISOString(),
       });
     }
@@ -285,13 +287,18 @@ export function createApp(deps: AppDeps): express.Express {
     if (!real || !["image/jpeg", "image/png", "image/webp"].includes(real)) {
       return res.status(415).json(errorBody("UNSUPPORTED_MEDIA", "Accepted: JPEG, PNG, WebP. If your photo is HEIC, please re-save or screenshot it as JPEG/PNG and retry.", rid));
     }
-    const sanitized = real === "image/jpeg" ? stripJpegMetadata(file.buffer) : file.buffer;
-    const stored = await deps.storage.put(session.caseId, file.originalname || "photo", sanitized, real);
+    let sanitized: Buffer;
+    try { sanitized = await sanitizeImage(file.buffer); }
+    catch (e) {
+      if (!(e instanceof ModelFailure)) throw e;
+      return res.status(422).json(errorBody("INVALID_IMAGE", "Photo could not be processed. Use a still JPEG/PNG/WebP up to 24 megapixels, or enter the label manually.", rid));
+    }
+    const stored = await deps.storage.put(session.caseId, file.originalname || "photo", sanitized, "image/webp");
     const att = {
       id: randomUUID(), tenantId: tenant.id, caseId: session.caseId,
       kind: kind as "label_photo" | "error_display" | "other",
-      mimeType: real, sizeBytes: stored.sizeBytes, storageKey: stored.storageKey,
-      sha256: stored.sha256, rawOcrText: null as string | null, createdAt: new Date().toISOString(),
+      mimeType: "image/webp", sizeBytes: stored.sizeBytes, storageKey: stored.storageKey,
+      sha256: stored.sha256, sourceSha256: createHash("sha256").update(file.buffer).digest("hex"), rawOcrText: null as string | null, createdAt: new Date().toISOString(),
     };
     // Test-only hook: deterministic OCR text for parsing tests. Disabled in
     // every other environment — production labels go through vision OCR.

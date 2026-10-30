@@ -1,3 +1,99 @@
+# Implementation verification — October 30, 2026
+
+Base: `e1e94ac`, branch `main`. No repository AGENTS.md was found. The original
+static-demo working tree was preserved and excluded from this implementation commit.
+No production deployment, DNS change, live inference or real customer traffic was used.
+
+## Executed baseline
+
+- `npm test`: 64/64 passed (including seven PGlite tests).
+- `npm run typecheck` and `npm run build`: passed.
+- Product browser script and `npm run demo:test`: could not launch; configured Chrome
+  executable is absent. Cached browser archives are incomplete and a bounded fresh
+  download did not finish. The older browser pass counts below are historical.
+
+## Changes
+
+- Shared explicit fixture/live validation and construction for web/worker. Production
+  requires persistent PostgreSQL, HTTPS origin, real secrets and persistent media/ledger
+  paths; no implicit key-based live mode or production memory fallback. Readiness labels
+  memory as non-durable and redacts internal errors. Compose/env/runbook agree.
+- Atomic submitted assessment/snapshot/case/audit/outbox and atomic staff status events.
+  Concurrent/repeated submissions retain one logical handoff. Stable logical webhook
+  event/payload and exact signed bytes, persisted endpoint progress, due times, ordered
+  channel queues, lease generations, expiry recovery, bounded attempts and three staff
+  retry batches. At-least-once semantics are explicit; no exactly-once claim.
+- Native bounded JPEG/PNG/WebP decoding, orientation, metadata removal and full-size
+  private normalization. Original-upload hash plus stored-image hash preserve provenance.
+  In-memory vision JPEG is capped at 75KB within the unchanged 120KB serialized request
+  ceiling/reservation. Dense/unprocessable images use manual entry/crop guidance.
+- Private validated tenant/staff provisioning and salted-password rotation via stdin;
+  rotation revokes existing sessions. Durable SMTP work contains only a case reference
+  and authenticated staff URL. Delivery/job states and bounded retry appear in Settings.
+- Poll-cycle worker health, private model diagnostic export, scheduled tenant-scoped SQL
+  retention and retryable media deletion, recognized private-export retention, and
+  Compose-volume-aware backup/restore scripts. Usage accounting is never reset by retention.
+- Separate append-only technician identity verification and actor-scoped pause/resume
+  review intervals. Timer-derived review seconds are server-derived and distinct from
+  manual entries; submitted snapshots remain unchanged. Browser crashes still require
+  operator review of any unpaused interval before treating it as active effort.
+- Complete-brief fixed-input comparison through real submission, equivalent facts,
+  reviewed sources and image derivative, an independent general Meta brief, randomized
+  order/A-B artifacts, source/prompt hashes, raw responses, usage, latency and partial
+  failures. Old text-assessment runner remains separate. Outcome fact keys are rejected.
+  Adaptive interviewing is still an operator-recorded experiment.
+- Updated deployment, pilot smoke checklist, tenant template and grading exports.
+
+Schema: new migrations **007_durable_outbox.sql** and **008_image_provenance.sql**;
+historical migrations untouched. New runtime dependencies: Sharp/libvips and Nodemailer.
+New optional SMTP and private-export-root settings are in `.env.example`; production
+configuration is stricter and must be filled before launch. Deploy schema and application
+with both callers stopped; old worker helper signatures are incompatible.
+
+## Final executed checks
+
+- `npm test`: **100 passed, one container-only test skipped**; includes 11 PGlite
+  tests and synthetic mocked Meta/image, SMTP, provisioning, timer, retention,
+  rollback, retry, endpoint-progress and input-equivalence regressions.
+- `npm run typecheck`, `npm run build`, `git diff --check`: passed.
+- JS CLI/client syntax checks and `bash -n scripts/backup.sh scripts/restore.sh`: passed.
+- `docker pull postgres:16-alpine` eventually completed. The same SQL suite ran against
+  a dedicated local container using actual `app_runtime` credentials: **12/12 passed**,
+  including concurrent submissions, rollback, UUID endpoint progress and scoped retention.
+  Command: `TEST_POSTGRES_URL=<dedicated local owner URL>/mendcue_test npm test -- tests/pg.integration.test.ts`.
+  WSL host-port forwarding was unavailable; a temporary localhost TCP relay to the
+  container bridge supported the test. No production database was contacted.
+- Actual separate web/worker processes, fixture mode, shared container SQL and temporary
+  private media: created a case/photo/three queued turns, restarted PostgreSQL and web,
+  started worker, observed one handoff, authenticated staff photo access, anonymous photo
+  denial, and review persistence after reload. This is synthetic local runtime evidence.
+- `pg_dump -Fc`/`pg_restore --no-owner` into a second isolated container database, with a
+  separate temporary media tar/extract: restricted-role case lookup and restored attachment
+  SHA-256 checks passed. This is not a full Compose/VPS volume/TLS rehearsal.
+- Local SMTP receiver accepted the stable Message-ID/reference/staff link. No real mail
+  account or technician inbox was exercised.
+- Both browser commands were retried and still fail before browser launch because Chrome
+  is missing. No fresh visual/accessibility/screenshots claim is made.
+
+## Precise outstanding evidence and work
+
+- Full target Compose build/boot, actual Compose-volume restore, Caddy/TLS/VPS, outbound
+  provider access, account billing caps and live Meta text/label/complete-brief calls.
+- Real business configuration/origins, SMTP account and inbox receipt; real permitted
+  manufacturer PDFs and technician approval. `pdftotext` remains unavailable here;
+  original PDF prepare/review/publish mechanics were preserved, not falsely reverified.
+- Actual technician cases/grades, measured effort and outcomes. Synthetic responses,
+  timer tests and mocked paired runs are mechanics, not accuracy or time-savings results.
+- Fresh Chrome product/static-demo checks, 320px/zoom/keyboard and staff phone review.
+- Private operator files outside the configured managed root and backup expiry require
+  explicit operations policy; unknown usage/locks require manual billing reconciliation.
+- Semantic assertion validation remains conservative; unrestricted diagnosis, full PDF
+  viewer, adaptive automated evaluation and distributed budgets remain deferred.
+
+The prior checkpoint below is retained as historical context only.
+
+---
+
 # Verification and remaining upgrade work — October 29, 2026
 
 This is an implementation checkpoint, not a declaration that every NEXT_UPGRADE

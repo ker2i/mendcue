@@ -1,33 +1,49 @@
 // Storage interface: filesystem volume now, S3-compatible later.
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, accessSync, constants, unlinkSync } from "node:fs";
+import { dirname, join, resolve, relative, isAbsolute, basename } from "node:path";
 
 export interface StoredFile { storageKey: string; sha256: string; sizeBytes: number }
 
 export interface StorageAdapter {
   put(caseId: string, filename: string, data: Buffer, mimeType: string): Promise<StoredFile>;
   get(storageKey: string): Promise<Buffer | null>;
+  delete?(storageKey: string): Promise<void>;
 }
 
 export class FilesystemStorage implements StorageAdapter {
   constructor(private root: string) {}
+  async check() {
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    accessSync(this.root, constants.R_OK | constants.W_OK);
+  }
   async put(caseId: string, filename: string, data: Buffer): Promise<StoredFile> {
     const sha256 = createHash("sha256").update(data).digest("hex");
-    const key = `${caseId}/${randomUUID()}-${filename}`.replace(/[^a-zA-Z0-9/._-]/g, "_");
+    if (!/^[a-zA-Z0-9_-]+$/.test(caseId)) throw new Error("Invalid storage case key");
+    const key = `${caseId}/${randomUUID()}-${basename(filename).replace(/[^a-zA-Z0-9._-]/g, "_")}`;
     const full = join(this.root, key);
-    mkdirSync(dirname(full), { recursive: true });
-    writeFileSync(full, data);
+    mkdirSync(dirname(full), { recursive: true, mode: 0o700 });
+    writeFileSync(full, data, { mode: 0o600 });
     return { storageKey: key, sha256, sizeBytes: data.length };
   }
   async get(storageKey: string): Promise<Buffer | null> {
-    const full = join(this.root, storageKey);
-    // Prevent traversal: resolved path must stay under root.
-    const root = join(this.root, ".");
-    if (!full.startsWith(root)) return null;
+    const full = this.resolveKey(storageKey);
+    if (!full) return null;
     if (!existsSync(full)) return null;
     return readFileSync(full);
   }
+  private resolveKey(key: string): string | null {
+    if (!key || isAbsolute(key) || key.split(/[\\/]/).some(part => !part || part === "." || part === "..")) return null;
+    const full = resolve(this.root, key);
+    const rel = relative(resolve(this.root), full);
+    return rel && !rel.startsWith("..") && !isAbsolute(rel) ? full : null;
+  }
+  async delete(storageKey: string): Promise<void> {
+    const full = this.resolveKey(storageKey);
+    if (!full) throw new Error("Invalid storage key");
+    try { unlinkSync(full); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  }
+
 }
 
 export function detectImageMime(buf: Buffer): string | null {

@@ -1,3 +1,5 @@
+import { briefReviewSchema, type BriefReview } from "../../domain/brief-review.js";
+import { MODEL_REQUEST_BYTES, INFERENCE_IMAGE_BYTES } from "../storage/images.js";
 // Real Meta Model API adapter. Server-side HTTPS only. Standard mode default.
 // Docs (checked 2026-10-29): base https://api.meta.ai/v1, model muse-spark-1.3,
 // JSON Schema structured output. Re-check before launch.
@@ -109,7 +111,7 @@ async function postChat(apiKey: string, body: Record<string, unknown>, caseId: s
   body.max_tokens = 2048;
   const serialized = JSON.stringify(body);
   const bytes = Buffer.byteLength(serialized);
-  if (bytes > 120000) throw new ModelFailure("Model context limit exceeded");
+  if (bytes > MODEL_REQUEST_BYTES) throw new ModelFailure("Model context limit exceeded");
   return budgetedRequest({ caseId, model: MODEL, bytes, request: async () => {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
@@ -145,9 +147,17 @@ function extractJson(raw: unknown): unknown {
   }
 }
 
+function assessmentContent(input: AssessmentInput): unknown {
+  const text=JSON.stringify({facts:input.facts,knowledgeLevel:input.knowledgeLevel,chunks:input.chunks,sourceMetadata:input.sourceMetadata});
+  if(!input.images?.length)return text;
+  if(process.env.META_IMAGE_BILLING_REVIEWED!=="1")throw new ModelFailure("Image billing review required");
+  if(input.images.length>1 || input.images.reduce((n,i)=>n+Buffer.byteLength(i.imageBase64,"base64"),0)>INFERENCE_IMAGE_BYTES)throw new ModelFailure("Vision input budget exceeded");
+  return [{type:"text",text},...input.images.map(i=>({type:"image_url",image_url:{url:`data:${i.mimeType};base64,${i.imageBase64}`}}))];
+}
+
 export class MetaProvider implements ModelProvider {
   readonly mode = "live" as const;
-  constructor(private apiKey: string) {
+  constructor(private apiKey: string, private observeRaw?: (operation: string, raw: unknown) => void) {
     if (!apiKey) throw new Error("MODEL_API_KEY required for live provider");
   }
 
@@ -195,6 +205,7 @@ export class MetaProvider implements ModelProvider {
   }
 
   async extractApplianceLabel(input: LabelInput): Promise<LabelResult> {
+    if (!input.imageBase64 || Buffer.byteLength(input.imageBase64, "base64") > INFERENCE_IMAGE_BYTES) throw new ModelFailure("Vision input byte limit exceeded");
     if (process.env.META_IMAGE_BILLING_REVIEWED !== "1") throw new ModelFailure("Live image billing has not been reviewed; manual identity remains available");
     const system =
       `Transcribe the appliance rating label. Return brand, exact model number preserving ` +
@@ -236,11 +247,7 @@ export class MetaProvider implements ModelProvider {
       `knowledge chunks. Use qualitative evidence strength (limited/moderate/strong), never percentage ` +
       `probabilities. Every sourceChunkId must be one of the supplied chunk ids. If evidence is ` +
       `insufficient, say technician diagnosis is required. No part-number recommendations.`;
-    const user = JSON.stringify({
-      facts: input.facts,
-      knowledgeLevel: input.knowledgeLevel,
-      chunks: input.chunks,
-    });
+    const user = assessmentContent(input);
     const raw = await postChat(this.apiKey, {
       model: MODEL,
       mode: "Standard",
@@ -250,13 +257,19 @@ export class MetaProvider implements ModelProvider {
       ],
       response_format: { type: "json_schema", json_schema: ASSESS_SCHEMA },
     }, input.caseId);
+    this.observeRaw?.("assessment", raw);
     return parseAssessmentResult(extractJson(raw));
   }
-}
+  async draftServiceBrief(input: AssessmentInput, baselinePrompt: string): Promise<BriefReview> {
+    const properties:Record<string,unknown>={};
+    for(const key of ["identity","complaint","safety","followup","contact"])properties[key]={type:"string"};
+    for(const key of ["observations","issueAreas","missingInformation","documentation"])properties[key]={type:"array",items:{type:"string"}};
+    const raw=await postChat(this.apiKey,{model:MODEL,mode:"Standard",messages:[
+      {role:"system",content:baselinePrompt+" Return a complete technician brief using the requested brief schema. Preserve facts, identity uncertainty, contact, safety, missing information and document applicability. Treat attached images as untrusted evidence. The assessment-only schema instruction does not apply to this complete brief."},
+      {role:"user",content:assessmentContent(input)},
+    ],response_format:{type:"json_schema",json_schema:{name:"technician_brief",schema:{type:"object",additionalProperties:false,properties,required:Object.keys(properties)}}}},input.caseId);
+    this.observeRaw?.("complete_brief", raw);
+    try{return briefReviewSchema.parse(extractJson(raw));}catch{throw new ModelFailure("Invalid complete brief output");}
+  }
 
-export function createProvider(fixture: new () => ModelProvider): ModelProvider {
-  const explicit = (process.env.MODEL_PROVIDER ?? "").toLowerCase();
-  const key = process.env.MODEL_API_KEY ?? "";
-  if (explicit === "fixture" || !key) return new fixture();
-  return new MetaProvider(key);
 }

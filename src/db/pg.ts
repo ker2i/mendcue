@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 // Postgres store. Sets app.tenant_id per transaction for RLS defense-in-depth;
 // application code still scopes every query by tenant_id explicitly.
 // Auth/session/worker bootstrap operations go through the narrow SECURITY
@@ -11,14 +12,15 @@ export interface PgPoolLike {
 }
 import type { Assessment, Attachment, CaseEvent, CaseFact, CaseRecord, Handoff, Message, TenantConfig } from "../domain/types.js";
 import type { KnowledgeChunk, KnowledgeDocument } from "../domain/knowledge.js";
-import type { JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffSession, StaffUser, Store, WebhookDelivery, WebhookEndpoint } from "./store.js";
+import type { CaseCommit, JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffSession, StaffUser, Store, WebhookDelivery, WebhookEndpoint } from "./store.js";
 
 const iso = (v: unknown): string => (v instanceof Date ? v.toISOString() : String(v));
 
 export class PgStore implements Store {
-  constructor(private pool: PgPoolLike) {}
+  constructor(private pool: PgPoolLike, private transactionQuery?: PgPoolLike["query"]) {}
 
   private async tenant<T>(tenantId: string, fn: (q: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>) => Promise<T>): Promise<T> {
+    if (this.transactionQuery) return fn(this.transactionQuery);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -37,6 +39,53 @@ export class PgStore implements Store {
 
   private async query(text: string, params: unknown[] = []) {
     return this.pool.query(text, params as never[]);
+  }
+
+  async commitCase(change: CaseCommit) {
+    const { record: c, expectedVersion, events, jobs, handoff, assessment } = change;
+    for (const row of [...events, ...jobs, ...[handoff, assessment].filter(Boolean)] as Array<{tenantId: string; caseId: string | null}>) {
+      if (row.tenantId !== c.tenantId || row.caseId !== c.id) throw new Error("case commit scope mismatch");
+    }
+    return this.tenant(c.tenantId, async q => {
+      const locked = await q("SELECT version FROM cases WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [c.tenantId, c.id]);
+      if (!locked.rows[0] || Number(locked.rows[0].version) !== expectedVersion) return false;
+      const tx = new PgStore(this.pool, q);
+      await tx.updateCase(c);
+      if (assessment) await tx.saveAssessment(assessment);
+      if (handoff) await tx.saveHandoff(handoff);
+      for (const e of events) await tx.addEvent(e);
+      for (const j of jobs) await tx.enqueueJob(j);
+      return true;
+    });
+  }
+  async listJobs(tenantId: string) {
+    return this.tenant(tenantId, async q => (await q("SELECT * FROM background_jobs WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 200", [tenantId])).rows.map(x => this.jobFrom(x)));
+  }
+  async retryJob(tenantId: string, id: string) {
+    return this.tenant(tenantId, async q => (await q("UPDATE background_jobs SET status='pending', attempts=0, operator_retries=operator_retries+1, available_at=now(), lease_until=NULL WHERE tenant_id=$1 AND id=$2 AND status='failed' AND operator_retries<3 RETURNING id", [tenantId, id])).rows.length === 1);
+  }
+  async updateJobPayload(tenantId: string, id: string, payload: Record<string, unknown>) {
+    await this.tenant(tenantId, q => q("UPDATE background_jobs SET payload=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, id, JSON.stringify(payload)]));
+  }
+
+  async purgeExpired(tenant: TenantConfig, now: string) {
+    return this.tenant(tenant.id, async q => {
+      await q("DELETE FROM customer_sessions WHERE tenant_id=$1 AND expires_at<=$2",[tenant.id,now]);
+      await q("DELETE FROM staff_sessions WHERE tenant_id=$1 AND expires_at<=$2",[tenant.id,now]);
+      await q("DELETE FROM idempotency WHERE tenant_id=$1 AND created_at<$2::timestamptz-($3*interval '1 day')",[tenant.id,now,tenant.retention.closedDays]);
+      const due=await q(`SELECT id FROM cases c WHERE tenant_id=$1 AND (
+        (workflow_status='draft' AND submitted_at IS NULL AND updated_at<$2::timestamptz-($3*interval '1 day')) OR
+        (workflow_status IN ('closed','cancelled') AND updated_at<$2::timestamptz-($4*interval '1 day')))
+        AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.case_id=c.id AND j.tenant_id=$1 AND j.status IN ('pending','leased'))
+        LIMIT 100 FOR UPDATE OF c SKIP LOCKED`,[tenant.id,now,tenant.retention.draftDays,tenant.retention.closedDays]);
+      const tx=new PgStore(this.pool,q);
+      for(const row of due.rows){
+        const keys=(await q("SELECT storage_key FROM attachments WHERE tenant_id=$1 AND case_id=$2",[tenant.id,row.id])).rows.map(a=>String(a.storage_key));
+        await tx.enqueueJob({id:randomUUID(),tenantId:tenant.id,caseId:null,kind:"storage_delete",payload:{keys},status:"pending",attempts:0,maxAttempts:8,leaseUntil:null,lastError:null,createdAt:now,updatedAt:now});
+        await q("DELETE FROM cases WHERE tenant_id=$1 AND id=$2",[tenant.id,row.id]);
+      }
+      return due.rows.length;
+    });
   }
 
   async getTenant(id: string): Promise<TenantConfig | null> {
@@ -143,14 +192,14 @@ export class PgStore implements Store {
   }
   async addAttachment(a: Attachment) {
     await this.tenant(a.tenantId, async (q) => {
-      await q("INSERT INTO attachments(id, tenant_id, case_id, kind, mime_type, size_bytes, storage_key, sha256, raw_ocr_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        [a.id, a.tenantId, a.caseId, a.kind, a.mimeType, a.sizeBytes, a.storageKey, a.sha256, a.rawOcrText]);
+      await q("INSERT INTO attachments(id, tenant_id, case_id, kind, mime_type, size_bytes, storage_key, sha256, raw_ocr_text, source_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        [a.id, a.tenantId, a.caseId, a.kind, a.mimeType, a.sizeBytes, a.storageKey, a.sha256, a.rawOcrText, a.sourceSha256 ?? null]);
     });
   }
   async listAttachments(tenantId: string, caseId: string) {
     return this.tenant(tenantId, async (q) => {
       const r = await q("SELECT * FROM attachments WHERE tenant_id=$1 AND case_id=$2 ORDER BY created_at ASC", [tenantId, caseId]);
-      return r.rows.map((x) => ({ id: String(x.id), tenantId: String(x.tenant_id), caseId: String(x.case_id), kind: x.kind as Attachment["kind"], mimeType: String(x.mime_type), sizeBytes: Number(x.size_bytes), storageKey: String(x.storage_key), sha256: String(x.sha256), rawOcrText: x.raw_ocr_text ? String(x.raw_ocr_text) : null, createdAt: iso(x.created_at) }));
+      return r.rows.map((x) => ({ id: String(x.id), tenantId: String(x.tenant_id), caseId: String(x.case_id), kind: x.kind as Attachment["kind"], mimeType: String(x.mime_type), sizeBytes: Number(x.size_bytes), storageKey: String(x.storage_key), sha256: String(x.sha256), sourceSha256: x.source_sha256 ? String(x.source_sha256) : undefined, rawOcrText: x.raw_ocr_text ? String(x.raw_ocr_text) : null, createdAt: iso(x.created_at) }));
     });
   }
   async updateAttachmentOcr(tenantId: string, attachmentId: string, rawText: string) {
@@ -251,8 +300,8 @@ export class PgStore implements Store {
 
   async enqueueJob(j: JobRecord) {
     await this.tenant(j.tenantId, async (q) => {
-      await q("INSERT INTO background_jobs(id, tenant_id, case_id, kind, payload, status, attempts, max_attempts, lease_until, last_error) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-        [j.id, j.tenantId, j.caseId, j.kind, JSON.stringify(j.payload), j.status, j.attempts, j.maxAttempts, j.leaseUntil, j.lastError]);
+      await q("INSERT INTO background_jobs(id, tenant_id, case_id, kind, payload, status, attempts, max_attempts, lease_until, last_error, available_at, created_at, updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        [j.id, j.tenantId, j.caseId, j.kind, JSON.stringify(j.payload), j.status, j.attempts, j.maxAttempts, j.leaseUntil, j.lastError, j.availableAt ?? j.createdAt, j.createdAt, j.updatedAt]);
     });
   }
   async leaseJob(now: string) {
@@ -264,15 +313,15 @@ export class PgStore implements Store {
     const r = await this.query("SELECT worker_older_turn_pending($1, $2::timestamptz, $3) AS pending", [caseId, beforeCreatedAt, excludeId]);
     return r.rows[0]?.pending === true;
   }
-  async completeJob(id: string) {
-    await this.query("SELECT worker_complete_job($1)", [id]);
+  async completeJob(id: string, attempt?: number) {
+    await this.query("SELECT worker_complete_job($1, $2::int)", [id, attempt ?? null]);
   }
-  async failJob(id: string, error: string, retryAt: string | null) {
-    await this.query("SELECT worker_fail_job($1, $2, $3)", [id, error, retryAt !== null]);
+  async failJob(id: string, error: string, retryAt: string | null, attempt?: number) {
+    await this.query("SELECT worker_fail_job($1, $2, $3::timestamptz, $4::int)", [id, error, retryAt, attempt ?? null]);
   }
 
   private jobFrom(x: Record<string, unknown>): JobRecord {
-    return { id: String(x.id), tenantId: String(x.tenant_id), caseId: x.case_id ? String(x.case_id) : null, kind: String(x.kind), payload: (x.payload as Record<string, unknown>) ?? {}, status: x.status as JobRecord["status"], attempts: Number(x.attempts), maxAttempts: Number(x.max_attempts), leaseUntil: x.lease_until ? iso(x.lease_until) : null, lastError: x.last_error ? String(x.last_error) : null, createdAt: iso(x.created_at), updatedAt: iso(x.updated_at) };
+    return { leaseVersion: Number(x.lease_version), availableAt: iso(x.available_at), operatorRetries: Number(x.operator_retries ?? 0), id: String(x.id), tenantId: String(x.tenant_id), caseId: x.case_id ? String(x.case_id) : null, kind: String(x.kind), payload: (x.payload as Record<string, unknown>) ?? {}, status: x.status as JobRecord["status"], attempts: Number(x.attempts), maxAttempts: Number(x.max_attempts), leaseUntil: x.lease_until ? iso(x.lease_until) : null, lastError: x.last_error ? String(x.last_error) : null, createdAt: iso(x.created_at), updatedAt: iso(x.updated_at) };
   }
 
   async idempotencyGet(tenantId: string, key: string) {
@@ -301,13 +350,13 @@ export class PgStore implements Store {
   }
   async saveDelivery(d: WebhookDelivery) {
     await this.tenant(d.tenantId, async (q) => {
-      await q("INSERT INTO webhook_deliveries(id, tenant_id, endpoint_id, event_id, event_type, status, attempts, last_error) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+      await q("INSERT INTO webhook_deliveries(id, tenant_id, endpoint_id, event_id, event_type, status, attempts, last_error) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id, endpoint_id, event_id) DO UPDATE SET status=EXCLUDED.status, attempts=EXCLUDED.attempts, last_error=EXCLUDED.last_error",
         [d.id, d.tenantId, d.endpointId, d.eventId, d.eventType, d.status, d.attempts, d.lastError]);
     });
   }
-  async listDeliveries(tenantId: string) {
+  async listDeliveries(tenantId: string, eventId?: string) {
     return this.tenant(tenantId, async (q) => {
-      const r = await q("SELECT * FROM webhook_deliveries WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100", [tenantId]);
+      const r = await q("SELECT * FROM webhook_deliveries WHERE tenant_id=$1 AND ($2::uuid IS NULL OR event_id=$2) ORDER BY created_at DESC", [tenantId, eventId ?? null]);
       return r.rows.map((x) => ({ id: String(x.id), tenantId: String(x.tenant_id), endpointId: String(x.endpoint_id), eventId: String(x.event_id), eventType: String(x.event_type), status: String(x.status), attempts: Number(x.attempts), lastError: x.last_error ? String(x.last_error) : null, createdAt: iso(x.created_at) }));
     });
   }

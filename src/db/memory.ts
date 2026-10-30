@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 // In-memory store for tests and local dev without Postgres.
 // Every read enforces tenantId; cross-tenant access returns null/[].
 import type { Assessment, Attachment, CaseEvent, CaseFact, CaseRecord, Handoff, Message, TenantConfig } from "../domain/types.js";
 import type { KnowledgeChunk, KnowledgeDocument } from "../domain/knowledge.js";
-import type { JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffSession, StaffUser, Store, WebhookDelivery, WebhookEndpoint } from "./store.js";
+import type { CaseCommit, JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffSession, StaffUser, Store, WebhookDelivery, WebhookEndpoint } from "./store.js";
 
 export class MemoryStore implements Store {
   tenants = new Map<string, TenantConfig>();
@@ -24,6 +25,59 @@ export class MemoryStore implements Store {
   staffSessions = new Map<string, StaffSession>();
   svcCreds = new Map<string, ServiceCredential>();
   outcomes = new Map<string, OutcomeRecord>();
+
+  async commitCase(input: CaseCommit) {
+    // Clone/validate everything before mutation; no awaits inside the commit.
+    const change = structuredClone(input);
+    const { record: c, expectedVersion, events, jobs, handoff, assessment } = change;
+    const current = this.cases.get(c.id);
+    if (!current || current.tenantId !== c.tenantId || current.version !== expectedVersion) return false;
+    for (const row of [...events, ...jobs, ...[handoff, assessment].filter(Boolean)] as Array<{tenantId: string; caseId: string | null}>) {
+      if (row.tenantId !== c.tenantId || row.caseId !== c.id) throw new Error("case commit scope mismatch");
+    }
+    if (handoff && this.handoffs.some(h => h.caseId === c.id && h.version === handoff.version)) throw new Error("duplicate handoff");
+    this.cases.set(c.id, c);
+    this.events.push(...events);
+    this.jobs.push(...jobs);
+    if (handoff) this.handoffs.push(handoff);
+    if (assessment) this.assessments.set(`${c.tenantId}:${c.id}`, assessment);
+    return true;
+  }
+  async listJobs(tenantId: string) { return structuredClone(this.jobs.filter(j => j.tenantId === tenantId)); }
+  async retryJob(tenantId: string, id: string) {
+    const j = this.jobs.find(j => j.id === id && j.tenantId === tenantId);
+    if (!j || j.status !== "failed" || (j.operatorRetries ?? 0) >= 3) return false;
+    j.operatorRetries = (j.operatorRetries ?? 0) + 1;
+    j.attempts = 0; j.status = "pending"; j.leaseUntil = null; j.availableAt = new Date().toISOString();
+    return true;
+  }
+  async updateJobPayload(tenantId: string, id: string, payload: Record<string, unknown>) {
+    const j = this.jobs.find(j => j.id === id && j.tenantId === tenantId);
+    if (j) j.payload = structuredClone(payload);
+  }
+
+  async purgeExpired(tenant: TenantConfig, now: string) {
+    const cutoff = (days: number) => Date.parse(now)-days*86400000;
+    let count=0;
+    for (const c of [...this.cases.values()]) {
+      if(c.tenantId!==tenant.id)continue;
+      const expired=(c.workflowStatus==="draft" && !c.submittedAt && Date.parse(c.updatedAt)<cutoff(tenant.retention.draftDays)) ||
+        (["closed","cancelled"].includes(c.workflowStatus) && Date.parse(c.updatedAt)<cutoff(tenant.retention.closedDays));
+      if(!expired || this.jobs.some(j=>j.caseId===c.id && ["pending","leased"].includes(j.status)))continue;
+      const keys=this.attachments.filter(a=>a.caseId===c.id&&a.tenantId===tenant.id).map(a=>a.storageKey);
+      this.jobs.push({id:randomUUID(),tenantId:tenant.id,caseId:null,kind:"storage_delete",payload:{keys},status:"pending",attempts:0,maxAttempts:8,leaseUntil:null,lastError:null,createdAt:now,updatedAt:now});
+      this.cases.delete(c.id);this.assessments.delete(`${tenant.id}:${c.id}`);this.outcomes.delete(`${tenant.id}:${c.id}`);
+      for(const name of ["messages","facts","attachments","handoffs","events","jobs"] as const) {
+        // All entries for this globally unique case are relational dependants.
+        (this[name] as Array<{caseId:string|null}>) = this[name].filter(row=>row.caseId!==c.id);
+      }
+      for(const [id,session] of this.sessions)if(session.tenantId===tenant.id&&session.caseId===c.id)this.sessions.delete(id);
+      count++;
+    }
+    for(const [id,s]of this.sessions)if(s.tenantId===tenant.id&&s.expiresAt<=now)this.sessions.delete(id);
+    for(const [id,s]of this.staffSessions)if(s.tenantId===tenant.id&&s.expiresAt<=now)this.staffSessions.delete(id);
+    return count;
+  }
 
   async getTenant(id: string) { return this.tenants.get(id) ?? null; }
   async getTenantBySlug(slug: string) {
@@ -114,12 +168,19 @@ export class MemoryStore implements Store {
 
   async enqueueJob(j: JobRecord) { this.jobs.push(structuredClone(j)); }
   async leaseJob(now: string) {
-    const job = this.jobs.find((j) =>
-      j.status === "pending" || (j.status === "leased" && j.leaseUntil !== null && j.leaseUntil < now));
+    for (const j of this.jobs) {
+      if (j.attempts >= j.maxAttempts && (j.status === "pending" || (j.status === "leased" && j.leaseUntil! <= now))) j.status = "failed";
+    }
+    const ordered = this.jobs;
+    const job = ordered.find((j, i) =>
+      (j.availableAt ?? j.createdAt) <= now && j.attempts < j.maxAttempts &&
+      (j.status === "pending" || (j.status === "leased" && j.leaseUntil !== null && j.leaseUntil <= now)) &&
+      !ordered.slice(0,i).some(older => j.caseId !== null && older.caseId === j.caseId && older.tenantId === j.tenantId && (older.kind === j.kind || (["turn","label"].includes(older.kind) && ["turn","label"].includes(j.kind))) && ["pending", "leased", "failed"].includes(older.status)));
     if (!job) return null;
     job.status = "leased";
     job.attempts += 1;
-    job.leaseUntil = new Date(Date.now() + 60000).toISOString();
+    job.leaseVersion = (job.leaseVersion ?? 0) + 1;
+    job.leaseUntil = new Date(Date.parse(now) + 120000).toISOString();
     job.updatedAt = now;
     return structuredClone(job);
   }
@@ -127,16 +188,16 @@ export class MemoryStore implements Store {
     return this.jobs.some((j) => j.caseId === caseId && j.kind === "turn" && j.id !== excludeId &&
       (j.status === "pending" || j.status === "leased") && j.createdAt < beforeCreatedAt);
   }
-  async completeJob(id: string) {
+  async completeJob(id: string, attempt?: number) {
     const j = this.jobs.find((x) => x.id === id);
-    if (j) { j.status = "done"; j.updatedAt = new Date().toISOString(); }
+    if (j && (attempt === undefined || (j.status === "leased" && j.leaseVersion === attempt))) { if(j.kind === "storage_delete") j.payload = {}; j.status = "done"; j.updatedAt = new Date().toISOString(); }
   }
-  async failJob(id: string, error: string, retryAt: string | null) {
+  async failJob(id: string, error: string, retryAt: string | null, attempt?: number) {
     const j = this.jobs.find((x) => x.id === id);
-    if (!j) return;
+    if (!j || (attempt !== undefined && (j.status !== "leased" || j.leaseVersion !== attempt))) return;
     j.lastError = error;
     j.updatedAt = new Date().toISOString();
-    if (retryAt && j.attempts < j.maxAttempts) { j.status = "pending"; j.leaseUntil = null; }
+    if (retryAt && j.attempts < j.maxAttempts) { j.status = "pending"; j.leaseUntil = null; j.availableAt = retryAt; }
     else j.status = "failed";
   }
   async idempotencyGet(tenantId: string, key: string) { return this.idem.get(`${tenantId}:${key}`) ?? null; }
@@ -146,9 +207,12 @@ export class MemoryStore implements Store {
   async listEndpoints(tenantId: string) {
     return [...this.endpoints.values()].filter((e) => e.tenantId === tenantId).map((e) => structuredClone(e));
   }
-  async saveDelivery(d: WebhookDelivery) { this.deliveries.push(structuredClone(d)); }
-  async listDeliveries(tenantId: string) {
-    return this.deliveries.filter((d) => d.tenantId === tenantId).map((d) => structuredClone(d));
+  async saveDelivery(d: WebhookDelivery) {
+    const i = this.deliveries.findIndex(x => x.tenantId === d.tenantId && x.endpointId === d.endpointId && x.eventId === d.eventId);
+    if (i < 0) this.deliveries.push(structuredClone(d)); else this.deliveries[i] = structuredClone(d);
+  }
+  async listDeliveries(tenantId: string, eventId?: string) {
+    return this.deliveries.filter((d) => d.tenantId === tenantId && (!eventId || d.eventId === eventId)).map((d) => structuredClone(d));
   }
 
   async saveStaffUser(u: StaffUser) { this.staff.set(u.id, structuredClone(u)); }

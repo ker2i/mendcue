@@ -137,6 +137,8 @@ export interface LabelResult {
 }
 
 export interface AssessmentInput {
+  sourceMetadata?: Array<Record<string, unknown>>;
+  images?: Array<{ mimeType: string; imageBase64: string }>;
   tenantId: string;
   caseId: string;
   facts: Array<{ id: string; key: string; value: unknown }>;

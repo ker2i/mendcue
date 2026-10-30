@@ -12,6 +12,7 @@ export interface WorkerDeps {
   provider: ModelProvider;
   storage: StorageAdapter;
   pollMs?: number;
+  heartbeat?: () => void;
 }
 
 export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
@@ -22,19 +23,11 @@ export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
     if (job.kind === "turn" && job.caseId) {
       const tenant = await deps.store.getTenant(job.tenantId);
       if (!tenant) throw new Error("unknown tenant");
-      // Serialize per case in FIFO order: defer while an older turn job for
-      // this case still needs processing. Every message keeps its own job,
-      // so nothing is dropped (R06).
-      if (await deps.store.olderTurnJobPending(job.caseId, job.createdAt, job.id)) {
-        const backoff = new Date(Date.now() + 2000).toISOString();
-        await deps.store.failJob(job.id, "deferred: older turn pending", backoff);
-        return true;
-      }
       // Recheck case state before committing generated output.
       const c = await deps.store.getCase(job.tenantId, job.caseId);
       if (!c) throw new Error("case gone");
       if (c.conversationPhase === "submitted" || c.conversationPhase === "closed") {
-        await deps.store.completeJob(job.id);
+        await deps.store.completeJob(job.id, job.leaseVersion);
         return true;
       }
       const messageId = String(job.payload.messageId ?? "");
@@ -46,8 +39,14 @@ export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
         { store: deps.store, provider: deps.provider, storageGet: (k) => deps.storage.get(k) },
         tenant, job.caseId, messageId, msg.body, { consent }
       );
+    } else if (job.kind === "storage_delete") {
+      if(!deps.storage.delete)throw new Error("Storage deletion not supported");
+      for(const key of (job.payload.keys ?? []) as string[])await deps.storage.delete(key);
+    } else if (job.kind === "notification") {
+      const { sendNotification } = await import("../integrations/notifications.js");
+      await sendNotification(job);
     } else if (job.kind === "webhook" && job.caseId) {
-      await deliverWebhooks(deps, job.tenantId, job.caseId, job.payload);
+      await deliverWebhooks(deps, job);
     } else if (job.kind === "label" && job.caseId) {
       const { processLabelPhoto } = await import("../domain/intake.js");
       const tenant = await deps.store.getTenant(job.tenantId);
@@ -59,70 +58,72 @@ export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
     } else {
       throw new Error(`unknown job kind ${job.kind}`);
     }
-    await deps.store.completeJob(job.id);
+    await deps.store.completeJob(job.id, job.leaseVersion);
     return true;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "job failed";
     const backoff = Math.min(300_000, 5000 * 2 ** job.attempts);
     const retry = job.attempts < job.maxAttempts
       ? new Date(Date.now() + backoff).toISOString()
       : null;
-    await deps.store.failJob(job.id, msg.slice(0, 500), retry);
+    await deps.store.failJob(job.id, "Job processing failed", retry, job.leaseVersion);
     return true;
   }
 }
 
-async function deliverWebhooks(
-  deps: WorkerDeps, tenantId: string, caseId: string, payload: Record<string, unknown>
-): Promise<void> {
-  const endpoints = (await deps.store.listEndpoints(tenantId)).filter((e) => e.active);
-  if (endpoints.length === 0) return;
-  const c = await deps.store.getCase(tenantId, caseId);
-  const eventType = String(payload.eventType ?? "case.status_updated") as
-    "case.submitted" | "case.handoff_updated" | "case.status_updated" | "case.closed";
-  const handoffVersion = Number(payload.handoffVersion ?? 0);
-  for (const ep of endpoints) {
-    if (ep.events.length > 0 && !ep.events.includes(eventType)) continue;
-    const deliveries = await deps.store.listDeliveries(tenantId);
-    const seq = deliveries.length + 1;
-    const event = buildEvent(eventType, caseId, c?.externalReference ?? null, handoffVersion, seq);
-    const body = JSON.stringify(event);
-    const ts = String(Math.floor(Date.now() / 1000));
-    const sig = signWebhook(ep.secret, ts, body);
-    const now = new Date().toISOString();
-    try {
-      const res = await fetch(ep.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-intake-timestamp": ts,
-          "x-intake-signature": `sha256=${sig}`,
-          "x-intake-event-id": event.event_id,
-        },
-        body,
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!res.ok) throw new Error(`receiver ${res.status}`);
-      await deps.store.saveDelivery({
-        id: randomUUID(), tenantId, endpointId: ep.id, eventId: event.event_id,
-        eventType, status: "delivered", attempts: 1, lastError: null, createdAt: now,
-      });
-    } catch (e) {
-      await deps.store.saveDelivery({
-        id: randomUUID(), tenantId, endpointId: ep.id, eventId: event.event_id,
-        eventType, status: "failed", attempts: 1,
-        lastError: (e instanceof Error ? e.message : "delivery failed").slice(0, 300),
-        createdAt: now,
-      });
-      throw e; // job retry handles backoff
-    }
+async function deliverWebhooks(deps: WorkerDeps, job: import("../db/store.js").JobRecord): Promise<void> {
+  const { tenantId, caseId } = job;
+  const endpoints = (await deps.store.listEndpoints(tenantId)).filter(e => e.active);
+  const payload = job.payload;
+  // Upgrade pre-migration jobs once, before any network request.
+  if (!payload.event || !payload.endpointIds || typeof payload.eventBody !== "string") {
+    const c = await deps.store.getCase(tenantId, caseId!);
+    const event = payload.event ?? { ...buildEvent(String(payload.eventType ?? "case.status_updated") as import("../integrations/webhooks/sign.js").WebhookEvent["event_type"], caseId!, c?.externalReference ?? null, Number(payload.handoffVersion ?? 0), c?.version ?? 0), event_id: job.id, occurred_at: job.createdAt };
+    payload.event = event;
+    payload.eventBody = JSON.stringify(event);
+    const type = (event as { event_type: string }).event_type;
+    payload.endpointIds = endpoints.filter(e => !e.events.length || e.events.includes(type)).map(e => e.id);
+    await deps.store.updateJobPayload(tenantId, job.id, payload);
   }
+  const event = payload.event as import("../integrations/webhooks/sign.js").WebhookEvent;
+  const body = String(payload.eventBody);
+  const deliveries = await deps.store.listDeliveries(tenantId, event.event_id);
+  let failed = false;
+  for (const endpointId of payload.endpointIds as string[]) {
+    const ep = endpoints.find(e => e.id === endpointId);
+    if (!ep) continue; // Disabled/deleted endpoints are intentionally suppressed.
+    const previous = deliveries.find(d => d.endpointId === ep.id);
+    if (previous?.status === "delivered") continue;
+    const ts = String(Math.floor(Date.now() / 1000));
+    const delivery = { id: previous?.id ?? randomUUID(), tenantId, endpointId: ep.id,
+      eventId: event.event_id, eventType: event.event_type, status: "delivered", attempts: (previous?.attempts ?? 0) + 1,
+      lastError: null as string | null, createdAt: previous?.createdAt ?? new Date().toISOString() };
+    try {
+      const res = await fetch(ep.url, { method: "POST", redirect: "error",
+        headers: { "content-type": "application/json", "x-intake-timestamp": ts,
+          "x-intake-signature": `sha256=${signWebhook(ep.secret, ts, body)}`, "x-intake-event-id": event.event_id },
+        body, signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error("receiver rejected request");
+    } catch {
+      failed = true; delivery.status = "failed"; delivery.lastError = "Webhook delivery failed";
+    }
+    await deps.store.saveDelivery(delivery);
+  }
+  if (failed) throw new Error("Webhook delivery incomplete");
 }
 
 export async function runWorker(deps: WorkerDeps, stop: { stopped: boolean }): Promise<void> {
   const pollMs = deps.pollMs ?? 2000;
+  let nextRetention=0;
   while (!stop.stopped) {
+    if(Date.now()>=nextRetention){
+      for(const tenant of await deps.store.listTenants()){
+        await deps.store.purgeExpired(tenant,new Date().toISOString());
+        if(process.env.PRIVATE_ARTIFACT_ROOT){const {pruneArtifacts}=await import("../operator/artifact-retention.js");await pruneArtifacts(process.env.PRIVATE_ARTIFACT_ROOT,tenant.id,tenant.retention.logDays);}
+      }
+      nextRetention=Date.now()+3600000;
+    }
     const did = await processOneJob(deps);
+    deps.heartbeat?.();
     if (!did) await new Promise((r) => setTimeout(r, pollMs));
   }
 }

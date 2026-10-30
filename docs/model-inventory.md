@@ -19,3 +19,12 @@ Pricing checked against [Meta pricing](https://dev.meta.ai/docs/pricing-rate-lim
 The [official event page](https://dev.meta.ai/events/global-hackathon) still lists
 November 4, 2026 at 9 p.m. Eastern as the submission deadline. Portal-specific
 video length and required submission fields remain unverified.
+
+## October 30 implementation update
+
+The same Meta adapter also supports complete-brief comparison output. The production
+assessment can include the latest private label derivative. Sharp/libvips performs
+bounded ordinary decoding, orientation and compression locally; it is not model OCR.
+Web and worker now require identical explicit provider configuration. No live request
+was made in this session. Historical pricing/event-page observations above were not
+revalidated here. See benchmark-method.md and verification-latest.md for current scope.

@@ -1,3 +1,6 @@
+import { briefForReview } from "../domain/brief-review.js";
+import { reviewTimer } from "../domain/review-timer.js";
+import { webhookJob } from "../domain/outbox.js";
 // Staff dashboard API: cookie sessions, CSRF, role checks, all tenant-scoped.
 import express from "express";
 import { z } from "zod";
@@ -110,7 +113,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
       deps.store.getAssessment(staffTenant.id, c.id),
       deps.store.getOutcome(staffTenant.id, c.id),
     ]);
-    res.json({ case: c, facts, messages, attachments, handoffs, events, assessment, outcome });
+    res.json({ briefForReview: handoffs.length ? briefForReview(handoffs[handoffs.length-1].snapshot) : null, case: c, facts, messages, attachments, handoffs, events, assessment, outcome, reviewTimer: reviewTimer(events, ctx(req).staffSession.userId) });
   });
 
   app.patch("/api/v1/staff/cases/:caseId", staffAuth, requireMutate, async (req, res) => {
@@ -135,21 +138,41 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     const now = new Date().toISOString();
     c.version += 1;
     c.updatedAt = now;
-    await deps.store.updateCase(c);
-    await deps.store.addEvent({
-      id: randomUUID(), tenantId: staffTenant.id, caseId: c.id, type: "staff_update",
-      payload: { workflowStatus: parsed.data.workflowStatus ?? null, assignee: parsed.data.assignee ?? null, note: parsed.data.note ?? null },
-      createdAt: now,
+    const notify = parsed.data.workflowStatus && ["contacted", "scheduled", "closed", "cancelled"].includes(parsed.data.workflowStatus);
+    const committed = await deps.store.commitCase({ record: c, expectedVersion: parsed.data.version,
+      events: [{ id: randomUUID(), tenantId: staffTenant.id, caseId: c.id, type: "staff_update",
+        payload: { workflowStatus: parsed.data.workflowStatus ?? null, assignee: parsed.data.assignee ?? null, note: parsed.data.note ?? null }, createdAt: now }],
+      jobs: notify ? [webhookJob(c, ["closed", "cancelled"].includes(c.workflowStatus) ? "case.closed" : "case.status_updated", 0)] : [],
     });
-    // Enqueue status webhook on operational change.
-    if (parsed.data.workflowStatus && ["contacted", "scheduled", "closed", "cancelled"].includes(parsed.data.workflowStatus)) {
-      await deps.store.enqueueJob({
-        id: randomUUID(), tenantId: staffTenant.id, caseId: c.id, kind: "webhook",
-        payload: { eventType: parsed.data.workflowStatus === "closed" || parsed.data.workflowStatus === "cancelled" ? "case.closed" : "case.status_updated", handoffVersion: 0 },
-        status: "pending", attempts: 0, maxAttempts: 8, leaseUntil: null, lastError: null, createdAt: now, updatedAt: now,
-      });
-    }
+    if (!committed) return res.status(409).json(errorBody("CASE_VERSION_CONFLICT", "This case changed. Refresh before saving.", rid));
     res.json({ ok: true, version: c.version });
+  });
+
+  app.post("/api/v1/staff/cases/:caseId/identity-verification", staffAuth, requireMutate, async (req,res) => {
+    const {staffTenant,staffSession}=ctx(req);
+    const parsed=z.object({version:z.number().int(),brand:z.string().min(1).max(100),model:z.string().min(1).max(120),serial:z.string().max(120).nullable(),
+      provenance:z.enum(["physical_label","customer_contact","reviewed_document"]),note:z.string().min(1).max(1000)}).safeParse(req.body);
+    if(!parsed.success)return res.status(400).json(errorBody("VALIDATION_ERROR","Record the verified identity and its basis.",requestId()));
+    const c=await deps.store.getCase(staffTenant.id,req.params.caseId);
+    if(!c)return res.status(404).json(errorBody("NOT_FOUND","Case not found.",requestId()));
+    const event={id:randomUUID(),tenantId:staffTenant.id,caseId:c.id,type:"technician_identity_verified",payload:{...parsed.data,recordedBy:staffSession.userId},createdAt:new Date().toISOString()};
+    const ok=await deps.store.commitCase({record:{...c,version:c.version+1},expectedVersion:parsed.data.version,events:[event],jobs:[]});
+    if(!ok)return res.status(409).json(errorBody("CASE_VERSION_CONFLICT","Refresh before verifying identity.",requestId()));
+    res.status(201).json({verification:event});
+  });
+  app.post("/api/v1/staff/cases/:caseId/review-timer",staffAuth,requireMutate,async(req,res)=>{
+    const {staffTenant,staffSession}=ctx(req);
+    const parsed=z.object({version:z.number().int(),action:z.enum(["start","pause"])}).safeParse(req.body);
+    if(!parsed.success)return res.status(400).json(errorBody("VALIDATION_ERROR","Invalid timer action.",requestId()));
+    const c=await deps.store.getCase(staffTenant.id,req.params.caseId);
+    if(!c)return res.status(404).json(errorBody("NOT_FOUND","Case not found.",requestId()));
+    const events=await deps.store.listEvents(staffTenant.id,c.id);
+    const timer=reviewTimer(events,staffSession.userId);
+    if((parsed.data.action==="start")===!!timer.startedAt)return res.status(409).json(errorBody("TIMER_CONFLICT","Timer already in that state.",requestId()));
+    const event={id:randomUUID(),tenantId:staffTenant.id,caseId:c.id,type:"review_timer",payload:{action:parsed.data.action,recordedBy:staffSession.userId},createdAt:new Date().toISOString()};
+    const ok=await deps.store.commitCase({record:{...c,version:c.version+1},expectedVersion:c.version,events:[event],jobs:[]});
+    if(!ok)return res.status(409).json(errorBody("CASE_VERSION_CONFLICT","Refresh before changing the timer.",requestId()));
+    res.status(201).json({version:c.version+1,timer:reviewTimer([...events,event],staffSession.userId)});
   });
 
   // Append-only technician review; submitted snapshots remain unchanged.
@@ -172,10 +195,16 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     if (parsed.data.version !== c.version) return res.status(409).json(errorBody("CASE_VERSION_CONFLICT", "Refresh before reviewing.", requestId()));
     if (c.conversationPhase !== "submitted") return res.status(409).json(errorBody("VALIDATION_ERROR", "Review a submitted brief.", requestId()));
     const events = await deps.store.listEvents(staffTenant.id, c.id);
+    const timer=reviewTimer(events,staffSession.userId);
+    if(parsed.data.timingMethod==="measured"){
+      if(timer.startedAt)return res.status(409).json(errorBody("TIMER_CONFLICT","Pause the active timer before saving measured effort.",requestId()));
+      parsed.data.reviewSeconds=timer.activeSeconds;
+    }
     const event = { id: randomUUID(), tenantId: staffTenant.id, caseId: c.id, type: "technician_review",
       payload: { ...parsed.data, revision: events.filter(e => e.type === "technician_review").length + 1,
         recordedBy: staffSession.userId, approved: parsed.data.disposition === "ready_to_contact" }, createdAt: new Date().toISOString() };
-    await deps.store.addEvent(event);
+    const committed=await deps.store.commitCase({record:{...c,version:c.version+1},expectedVersion:parsed.data.version,events:[event],jobs:[]});
+    if(!committed)return res.status(409).json(errorBody("CASE_VERSION_CONFLICT","Refresh before reviewing.",requestId()));
     res.status(201).json({ review: event });
   });
 
@@ -226,6 +255,18 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     res.setHeader("content-type", att.mimeType);
     res.setHeader("cache-control", "private, max-age=60");
     res.send(Buffer.from(buf));
+  });
+
+  app.get("/api/v1/staff/jobs", staffAuth, async (req, res) => {
+    const jobs = await deps.store.listJobs(ctx(req).staffTenant.id);
+    // Payloads may contain private inputs; diagnostics expose only operational fields.
+    res.json({ jobs: jobs.map(j => ({ id: j.id, caseId: j.caseId, kind: j.kind, status: j.status,
+      attempts: j.attempts, maxAttempts: j.maxAttempts, availableAt: j.availableAt,
+      operatorRetries: j.operatorRetries ?? 0 })) });
+  });
+  app.post("/api/v1/staff/jobs/:jobId/retry", staffAuth, requireMutate, async (req, res) => {
+    const retried = await deps.store.retryJob(ctx(req).staffTenant.id, req.params.jobId);
+    res.status(retried ? 200 : 409).json({ retried });
   });
 
   app.get("/api/v1/staff/settings", staffAuth, async (req, res) => {

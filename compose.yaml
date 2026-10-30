@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: intake
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-intake_change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       POSTGRES_DB: intake
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -23,7 +23,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/intake
     networks: [private]
     command: ["node", "dist/db/migrate.js"]
 
@@ -33,7 +33,7 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:-intake_change_me}@postgres:5432/intake
+      DATABASE_URL: postgres://intake:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/intake
     networks: [private]
     command: ["node", "dist/db/seed.js"]
     profiles: ["seed"]
@@ -46,8 +46,10 @@ services:
         condition: service_completed_successfully
     env_file: [.env]
     environment:
-      DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:-change_me_in_production}@postgres:5432/intake
+      DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:?Set APP_RUNTIME_PASSWORD}@postgres:5432/intake
       PORT: "3000"
+      NODE_ENV: production
+      MEDIA_STORAGE_PATH: /data/media
       META_USAGE_LEDGER: /data/media/meta-usage.json
     volumes:
       - mediadata:/data/media
@@ -66,15 +68,17 @@ services:
         condition: service_completed_successfully
     env_file: [.env]
     environment:
-      DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:-change_me_in_production}@postgres:5432/intake
+      DATABASE_URL: postgres://app_runtime:${APP_RUNTIME_PASSWORD:?Set APP_RUNTIME_PASSWORD}@postgres:5432/intake
       SYNC_TURNS: "0"
+      NODE_ENV: production
+      MEDIA_STORAGE_PATH: /data/media
       META_USAGE_LEDGER: /data/media/meta-usage.json
     volumes:
       - mediadata:/data/media
     networks: [private]
     command: ["node", "dist/worker/index.js"]
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "dist/worker/index.js"]
+      test: ["CMD", "node", "-e", "const h=JSON.parse(require('fs').readFileSync('/tmp/mendcue-worker-health.json'));process.exit(Date.now()-h.completedCycleAt<180000?0:1)"]
       interval: 30s
       timeout: 5s
       retries: 3

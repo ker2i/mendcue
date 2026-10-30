@@ -23,7 +23,7 @@ function startApp() {
       cwd: new URL("..", import.meta.url).pathname,
       env: {
         ...process.env, PORT: String(PORT), APP_BASE_URL: BASE,
-        MODEL_PROVIDER: "fixture", SYNC_TURNS: "1", NODE_ENV: "test",
+        DATABASE_URL: "", MODEL_API_KEY: "", MODEL_PROVIDER: "fixture", SYNC_TURNS: "1", NODE_ENV: "test",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -76,7 +76,7 @@ async function sendMsg(frame, text) {
 async function main() {
   // 1px PNG for upload tests.
   const png = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAHUlEQVQokWP4TyJgGNVABGAgRhEyGNVADKB9KAEAr639H8LdEzEAAAAASUVORK5CYII=", "base64");
   writeFileSync("/tmp/mendcue-label.png", png);
 
   const app = await startApp();
@@ -259,12 +259,12 @@ async function main() {
     const QP = 4318;
     const qapp = spawn("node", ["dist/server/index.js"], {
       cwd: new URL("..", import.meta.url).pathname,
-      env: { ...process.env, PORT: String(QP), APP_BASE_URL: `http://localhost:${QP}`, MODEL_PROVIDER: "fixture", SYNC_TURNS: "0", NODE_ENV: "test" },
+      env: { ...process.env, PORT: String(QP), APP_BASE_URL: `http://localhost:${QP}`, DATABASE_URL: "", MODEL_API_KEY: "", MODEL_PROVIDER: "fixture", SYNC_TURNS: "0", NODE_ENV: "test" },
       stdio: "ignore",
     });
     const qwork = spawn("node", ["dist/worker/index.js"], {
       cwd: new URL("..", import.meta.url).pathname,
-      env: { ...process.env, MODEL_PROVIDER: "fixture", SYNC_TURNS: "0", NODE_ENV: "test", MEDIA_STORAGE_PATH: "./data/media" },
+      env: { ...process.env, DATABASE_URL: "", MODEL_API_KEY: "", MODEL_PROVIDER: "fixture", SYNC_TURNS: "0", NODE_ENV: "test", MEDIA_STORAGE_PATH: "./data/media" },
       stdio: "ignore",
     });
     try {

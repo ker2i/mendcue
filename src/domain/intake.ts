@@ -1,3 +1,5 @@
+import { inferenceImage } from "../integrations/storage/images.js";
+import { webhookJob } from "./outbox.js";
 // Shared tenant-aware intake engine. Used by widget, hosted site, dashboard, API.
 import { randomUUID } from "node:crypto";
 import type { Assessment, CaseFact, CaseRecord, Message, PendingAction, TenantConfig } from "./types.js";
@@ -8,7 +10,7 @@ import { findAction, findQuestion, nextQuestion, questionRationale } from "./que
 import { normalizeModel, evidenceReference, retrieveKnowledge } from "./knowledge.js";
 import { groundedIssueAreas } from "./brief.js";
 import { parseLabelText } from "./labelparse.js";
-import type { ModelProvider } from "../integrations/meta/provider.js";
+import type { AssessmentInput, ModelProvider } from "../integrations/meta/provider.js";
 import { ModelFailure } from "../integrations/meta/provider.js";
 import type { Store } from "../db/store.js";
 
@@ -593,9 +595,11 @@ export async function processLabelPhoto(
   if (!rawText) {
     try {
       const buf = await deps.storageGet(att.storageKey);
-      const b64 = (buf ?? Buffer.alloc(0)).toString("base64");
+      if (!buf) throw new ModelFailure("Private image missing");
+      const derivative = deps.provider.mode === "live" ? await inferenceImage(buf) : buf;
+      const b64 = derivative.toString("base64");
       const lr = await deps.provider.extractApplianceLabel({
-        tenantId: tenant.id, caseId: c.id, attachmentId, imageBase64: b64, mimeType: att.mimeType,
+        tenantId: tenant.id, caseId: c.id, attachmentId, imageBase64: b64, mimeType: deps.provider.mode === "live" ? "image/jpeg" : att.mimeType,
       });
       rawText = lr.rawText;
       brand = lr.brand;
@@ -802,7 +806,12 @@ export async function submitCase(
   const store = deps.store;
   const c = await store.getCase(tenant.id, caseId);
   if (!c) throw new Error("case not found");
-  if (c.conversationPhase === "submitted") throw new Error("already submitted");
+  if (c.submittedAt) {
+    const handoffs = await store.listHandoffs(tenant.id, caseId);
+    const assessment = await store.getAssessment(tenant.id, caseId);
+    if (!handoffs.length || !assessment) throw new Error("inconsistent submission");
+    return { handoffVersion: handoffs[handoffs.length - 1].version, assessment };
+  }
   const facts = (await store.listFacts(tenant.id, caseId)).filter((f) => f.status !== "superseded");
   const byKey = new Map(facts.map((f) => [f.key, f]));
   const missingRequired = tenant.requiredFields.filter((k) => !byKey.has(k));
@@ -838,12 +847,22 @@ export async function submitCase(
 
   let assessment: Assessment;
   try {
-    const ar = await deps.provider.assessCase({
+    const assessmentInput: AssessmentInput = {
       tenantId: tenant.id, caseId: c.id,
       facts: facts.map((f) => ({ id: f.id, key: f.key, value: f.value })),
       chunks: hits.map((h) => ({ id: h.chunk.id, documentId: h.chunk.documentId, page: h.chunk.pageLabel, text: h.chunk.text })),
       knowledgeLevel: level,
-    });
+      sourceMetadata: hits.map(h => { const {excerpt, ...metadata}=evidenceReference(h,docMap); return metadata; }),
+    };
+    if(deps.provider.mode==="live"){
+      const photo=(await store.listAttachments(tenant.id,caseId)).filter(a=>a.kind==="label_photo").at(-1);
+      if(photo){
+        const bytes=await deps.storageGet(photo.storageKey);
+        if(!bytes)throw new ModelFailure("Label photo unavailable");
+        assessmentInput.images=[{mimeType:"image/jpeg",imageBase64:(await inferenceImage(bytes)).toString("base64")}];
+      }
+    }
+    const ar = await deps.provider.assessCase(assessmentInput);
     const hyps = groundedIssueAreas(ar, facts);
     assessment = {
       id: randomUUID(), tenantId: tenant.id, caseId: c.id, status: "ok",
@@ -862,12 +881,9 @@ export async function submitCase(
       citations: hits.map((h) => ({ ...evidenceReference(h, docMap), page: h.chunk.pageLabel, quote: h.chunk.text.slice(0, 280) })),
       createdAt: now,
     };
-    await store.addEvent({
-      id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "model_failure",
-      payload: { reason: "assessment failed; factual summary only" }, createdAt: now,
-    });
+
   }
-  await store.saveAssessment(assessment);
+  // Assessment and immutable snapshot are persisted together below.
 
   // Immutable handoff snapshot.
   const existing = await store.listHandoffs(tenant.id, caseId);
@@ -905,33 +921,33 @@ export async function submitCase(
     hazard_route: hazardRoute,
     preferred_window: byKey.get("preferred_window")?.value ?? null,
     recommended_follow_up: assessment.recommendedFollowUp,
-    attachments: atts.map((a) => ({ id: a.id, kind: a.kind, mime: a.mimeType, sha256: a.sha256 })),
+    attachments: atts.map((a) => ({ id: a.id, kind: a.kind, mime: a.mimeType, sha256: a.sha256, source_sha256: a.sourceSha256 ?? null })),
     transcript_message_ids: messages.map((m) => m.id),
     model_mode: c.modelMode,
     handoff_version: version,
   };
-  await store.saveHandoff({ version, caseId: c.id, tenantId: tenant.id, createdAt: now, snapshot });
-
+  const expectedVersion = c.version;
   c.conversationPhase = "submitted";
   c.workflowStatus = "new";
   c.submittedAt = now;
   c.version += 1;
   c.updatedAt = now;
-  await store.updateCase(c);
-  await store.addEvent({
-    id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "case_submitted",
-    payload: { handoffVersion: version }, createdAt: now,
+  const committed = await store.commitCase({
+    record: c, expectedVersion, assessment,
+    handoff: { version, caseId: c.id, tenantId: tenant.id, createdAt: now, snapshot },
+    events: [{ id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "case_submitted",
+      payload: { handoffVersion: version }, createdAt: now }],
+    jobs: [webhookJob(c, "case.submitted", version), ...(tenant.notifications.emailEnabled && tenant.notifications.emailTo ? [{
+      id: randomUUID(), tenantId: tenant.id, caseId: c.id, kind: "notification",
+      payload: { to: tenant.notifications.emailTo, reference: c.reference,
+        staffUrl: `${process.env.APP_BASE_URL ?? "http://localhost:3000"}/staff#case=${encodeURIComponent(c.id)}` },
+      status: "pending" as const, attempts: 0, maxAttempts: 8, leaseUntil: null, lastError: null, createdAt: now, updatedAt: now,
+    }] : [])],
   });
-  // Outbox enqueue for webhook fan-out. NOTE (R13, remaining work): this is a
-  // separate write after the handoff commit, not a single atomic transaction,
-  // and each delivery attempt currently mints a fresh event ID. Receivers
-  // must treat delivery as at-least-once; stable event identity and a real
-  // available_at backoff are still to be implemented.
-  await store.enqueueJob({
-    id: randomUUID(), tenantId: tenant.id, caseId: c.id, kind: "webhook",
-    payload: { eventType: "case.submitted", handoffVersion: version },
-    status: "pending", attempts: 0, maxAttempts: 8, leaseUntil: null,
-    lastError: null, createdAt: now, updatedAt: now,
-  });
+  if (!committed) {
+    const current = await store.getCase(tenant.id, caseId);
+    if (current?.submittedAt) return submitCase(deps, tenant, caseId, opts);
+    throw new SubmitRejected("REVIEW_REQUIRED", [], "This case changed. Review the latest details before sending.");
+  }
   return { handoffVersion: version, assessment };
 }

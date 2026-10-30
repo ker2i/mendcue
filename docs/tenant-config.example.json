@@ -1,0 +1,82 @@
+{
+  "id": "tenant_replace_me",
+  "slug": "replace-business-slug",
+  "name": "Replace with real business name",
+  "demoLabel": "",
+  "orgType": "solo_repair",
+  "branding": {
+    "primaryColor": "#0b5fff",
+    "logoUrl": null
+  },
+  "contact": {
+    "email": null,
+    "phone": null
+  },
+  "timezone": "America/Phoenix",
+  "languages": [
+    "en"
+  ],
+  "allowedOrigins": [],
+  "publicKey": "pk_replace_with_random_public_key",
+  "categories": [
+    "refrigerator",
+    "freezer",
+    "washer",
+    "dishwasher",
+    "oven",
+    "dryer",
+    "other"
+  ],
+  "detailedCategories": [
+    "refrigerator",
+    "freezer",
+    "washer",
+    "dishwasher"
+  ],
+  "serviceZips": [
+    "85001",
+    "85002",
+    "85003",
+    "85004",
+    "85006",
+    "85008",
+    "85012",
+    "85014",
+    "85015",
+    "85016"
+  ],
+  "requireStreetAddress": false,
+  "requiredFields": [
+    "appliance_category",
+    "problem_description",
+    "service_zip",
+    "contact_channel"
+  ],
+  "playbookVersions": {
+    "refrigerator": "v1",
+    "washer": "v1",
+    "dishwasher": "v1",
+    "general": "v1"
+  },
+  "routing": {
+    "destination": "owner-inbox",
+    "queue": "Owner's inbox"
+  },
+  "notifications": {
+    "emailEnabled": false,
+    "emailTo": null
+  },
+  "retention": {
+    "draftDays": 7,
+    "closedDays": 90,
+    "logDays": 14
+  },
+  "privacyText": "Demo intake. Do not submit real personal data. Intake is stored for the demonstration only.",
+  "openingMessage": "I'm the AI intake assistant for Demo Phoenix Appliance Service (DEMO). I'll collect details about your appliance problem and prepare them for the service team. You can ask for a person at any time.",
+  "gasUtilityContact": "Southwest Gas emergency line (configure per service area)",
+  "featureFlags": {
+    "photos": true,
+    "knowledge": true,
+    "recall": false
+  }
+}
