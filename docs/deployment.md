@@ -49,6 +49,8 @@ adds due times, queue order, lease generations, bounded operator retries and sta
 per-endpoint delivery records. Migration 008 records the hash of upload bytes before
 normalization. Historical migrations are unchanged. Roll back application and schema
 as a coordinated operation; old workers use incompatible helper signatures.
+The migration runner commits each file's schema changes and its migration record
+in one transaction on one connection. A failure rolls back that file for a safe retry.
 
 SQL, media and the estimated usage ledger must persist across both processes.
 Compose mounts the same media volume and ledger path in each. `MEDIA_STORAGE_PATH`

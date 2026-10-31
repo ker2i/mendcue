@@ -1,13 +1,12 @@
 // Browser acceptance run (acceptance items 1-10 subset runnable without live model).
 // Usage: node scripts/browser-acceptance.mjs
-// Requires: npm run build, puppeteer-core, chrome-headless-shell.
-// Env: CHROME_BIN (default /tmp/cft/x/chrome-headless-shell-linux64/chrome-headless-shell)
+// Requires: npm run build, puppeteer-core and Chrome (Linux or Windows through WSL).
+// Env: CHROME_BIN overrides browser discovery.
 import { spawn } from "node:child_process";
 import http from "node:http";
 import { writeFileSync } from "node:fs";
-import puppeteer from "puppeteer-core";
+import { launchAcceptanceBrowser } from "./browser-launch.mjs";
 
-const CHROME = process.env.CHROME_BIN || "/tmp/cft/x/chrome-headless-shell-linux64/chrome-headless-shell";
 const PORT = 4317;
 const BASE = `http://localhost:${PORT}`;
 const ORIGIN2 = "http://127.0.0.1:3101";
@@ -80,12 +79,10 @@ async function main() {
   writeFileSync("/tmp/mendcue-label.png", png);
 
   const app = await startApp();
-  const origin2 = await startOrigin2();
-  const browser = await puppeteer.launch({
-    executablePath: CHROME,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
-  });
+  let origin2, browser;
   try {
+    origin2 = await startOrigin2();
+    browser = await launchAcceptanceBrowser();
     // ---- A. hosted intake, desktop ----
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
@@ -207,6 +204,7 @@ async function main() {
     });
 
     const staff = await browser.newPage();
+    staff.on("pageerror", (e) => errors.push(String(e)));
     await staff.setViewport({width:1440,height:900});
     await staff.goto(`${BASE}/staff`, { waitUntil: "networkidle0" });
     await staff.type("#slug", "demo-phoenix-appliance");
@@ -235,23 +233,80 @@ async function main() {
     ok("staff photo renders", photoCount === 1, `${photoCount} photos`);
     const photoOk = await staff.$eval("#detail img.thumb", (img) => img.naturalWidth > 0).catch(() => false);
     ok("staff photo bytes load", photoOk === true);
+    await staff.bringToFront();
+    const staffCaseUrl = `/api/v1/staff/cases/${sess.caseId}`;
+    const snapshotBefore = await staff.evaluate(async url => (await (await fetch(url)).json()).handoffs, staffCaseUrl);
+    await staff.evaluate(() => {
+      document.querySelector('.review-panel details').open = true;
+      const fields = document.querySelectorAll('.review-panel textarea');
+      fields[0].value = 'Synthetic correction retained during active review.';
+      fields[1].value = 'When cooling changed'; fields[2].value = 'Unconfirmed component failure'; fields[3].value = 'Synthetic browser feedback';
+      const identity = document.querySelectorAll('.identity-panel input');
+      ['LG', 'LFXS26973S', 'SYNTHETIC-ONLY', 'Synthetic fixture label reviewed for this browser check.'].forEach((v,i) => identity[i].value = v);
+    });
+    const operation = (suffix) => staff.waitForResponse(r => r.url().endsWith(suffix) && r.request().method() === 'POST');
+    const verifyResponse = operation('/identity-verification');
+    await staff.click('.identity-panel button');
+    ok('technician identity verification saved', (await verifyResponse).status() === 201);
+    await staff.waitForFunction(() => document.querySelector('.identity-panel').textContent.includes('Verification saved.'));
+    const timerClick = async (keyboard = false) => {
+      const response = operation('/review-timer');
+      if (keyboard) {
+        await staff.focus('.identity-panel button:last-of-type');await staff.keyboard.press('Enter');
+      } else await staff.click('.identity-panel button:last-of-type');
+      const r = await response;
+      await staff.waitForFunction(() => !document.querySelector('.identity-panel button:last-of-type').disabled);
+      return r.status() === 201;
+    };
+    ok('active review timer starts', await timerClick());
+    const autoPause = operation('/review-timer');
+    const background = await browser.newPage();
+    await background.bringToFront();
+    ok('background review auto-pauses', (await autoPause).status() === 201);
+    await staff.bringToFront();
+    await staff.waitForFunction(() => document.querySelector('.identity-panel button:last-of-type').textContent.includes('Resume'));
+    ok('paused timer control recovers without losing corrections', await staff.$eval('.review-panel textarea', e => e.value.includes('retained during active review')));
+    ok('active review timer resumes', await timerClick());
+    ok('active review timer pauses', await timerClick());
+    ok('review timer supports keyboard activation', await timerClick(true));
+    const settingsPause = operation('/review-timer');
+    await staff.click('#tabSettings');
+    ok('opening settings pauses active review', (await settingsPause).status() === 201);
+    await staff.click('#tabInbox');
+    await staff.waitForFunction(() => !document.querySelector('.identity-panel button:last-of-type').disabled);
+    await staff.click('.review-panel input[type=checkbox]');
     const approve = await staff.$$("#detail .review-panel button");
     ok("technician action panel present", approve.length === 3);
     await approve[0].click();
     await sleep(700);
     ok("technician approval saved", (await staff.$eval("#detail", e => e.innerText)).includes("Technician approved"));
+    await staff.reload({waitUntil:'networkidle0'});
+    // Reload returns to the authenticated login form; sign back in to reopen the stable case URL.
+    await staff.type('#slug','demo-phoenix-appliance');await staff.type('#email','tech@demo-phoenix.invalid');await staff.type('#pw','demo-tech-1234');await staff.click('#go');
+    await staff.waitForSelector('.identity-panel');
+    const saved = await staff.evaluate(async url => await (await fetch(url)).json(), staffCaseUrl);
+    const review = saved.events.filter(e => e.type === 'technician_review').at(-1);
+    ok('measured review and feedback persist after reload', review.payload.timingMethod === 'measured' && review.payload.missingFacts.includes('When cooling changed') && review.payload.unsupportedAssertions.includes('Unconfirmed component failure'));
+    ok('technician verification leaves submitted snapshot unchanged', JSON.stringify(saved.handoffs) === JSON.stringify(snapshotBefore));
+    ok('saved correction fields refill after reload', await staff.$eval('.review-panel textarea', e => e.value.includes('retained during active review')));
+    await staff.setViewport({width:320,height:844});
+    ok('320px staff detail reflows', await staff.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await (await staff.$('.identity-panel')).screenshot({path:'/tmp/mendcue-staff-review-phone.png'});
+    await staff.setViewport({width:640,height:844,deviceScaleFactor:2});
+    ok('staff reflows at 200 percent equivalent viewport', await staff.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await staff.setViewport({width:1440,height:900});
     ok("stable case navigation", staff.url().includes("#case="));
     await pageM.setViewport({width:320,height:844});
     const narrowFrame = await frameOf(pageM);
     ok("320px intake reflows", await narrowFrame.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await pageM.setViewport({width:390,height:844});
-    await page.screenshot({ path: "/tmp/mendcue-hosted.png" });
+    await page.bringToFront();await page.screenshot({ path: "/tmp/mendcue-hosted.png" });
     // Capture a normal synthetic case after the separate markup regression.
     await staff.evaluate(() => { const row = [...document.querySelectorAll("#inbox .inbox-row")].find(e => e.textContent.includes("washer")); if (row) row.click(); });
     await sleep(700);
     await staff.evaluate(() => scrollTo(0,0));
-    await staff.screenshot({ path: "/tmp/mendcue-staff.png" });
-    await pageM.screenshot({ path: "/tmp/mendcue-phone.png" });
+    await staff.bringToFront();await staff.screenshot({ path: "/tmp/mendcue-staff.png" });
+    await pageM.bringToFront();await pageM.screenshot({ path: "/tmp/mendcue-phone.png" });
 
     ok("no page errors on hosted page", errors.length === 0, errors.slice(0, 2).join(" | ").slice(0, 200));
 
@@ -289,9 +344,8 @@ async function main() {
       qwork.kill();
     }
   } finally {
-    await browser.close();
-    origin2.close();
-    app.kill();
+    try { if (browser) await browser.close(); }
+    finally { origin2?.close(); app.kill(); }
   }
   const failed = results.filter((r) => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} browser checks passed.`);

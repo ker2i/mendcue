@@ -15,10 +15,30 @@
   function csrf() { return { "content-type": "application/json", "x-csrf-token": cookie("staff_csrf") }; }
 
   var S = { user: null, tenant: null, cases: [], openId: null, detail: null, tab: "inbox" };
-  function pauseActiveReview(){
-    if(!S.detail||!S.detail.reviewTimer||!S.detail.reviewTimer.startedAt)return;
-    var detail=S.detail;
-    fetch("/api/v1/staff/cases/"+detail.case.id+"/review-timer",{method:"POST",keepalive:true,headers:csrf(),body:JSON.stringify({version:detail.case.version,action:"pause"})}).then(function(r){if(!r.ok)return;return r.json().then(function(x){detail.case.version=x.version;detail.reviewTimer=x.timer;});});
+  function changeReviewTimer(detail, action) {
+    if (detail.timerRequest) return detail.timerRequest;
+    detail.timerRequest = fetch("/api/v1/staff/cases/" + detail.case.id + "/review-timer", {
+      method: "POST", keepalive: true, headers: csrf(), body: JSON.stringify({version: detail.case.version, action: action})
+    }).then(function(r) {
+      if (!r.ok) throw Error("Timer could not be updated. Refresh this case before recording measured effort.");
+      return r.json();
+    }).then(function(x) {
+      detail.case.version = x.version;
+      detail.reviewTimer = x.timer;
+      detail.timerError = "";
+    }).catch(function(e) { detail.timerError = e.message; }).finally(function() {
+      detail.timerRequest = null;
+      if (detail.refreshTimer) detail.refreshTimer();
+    });
+    if (detail.refreshTimer) detail.refreshTimer();
+    return detail.timerRequest;
+  }
+  function pauseActiveReview() {
+    var detail = S.detail;
+    if (!detail) return Promise.resolve();
+    return Promise.resolve(detail.timerRequest).then(function() {
+      if (detail.reviewTimer && detail.reviewTimer.startedAt) return changeReviewTimer(detail, "pause");
+    });
   }
   document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")pauseActiveReview();});
   window.addEventListener("pagehide",pauseActiveReview);
@@ -94,13 +114,11 @@
   function flag(text, danger) { return el("span", text, danger ? "flag flag-danger" : "flag"); }
 
   function openCase(id) {
-    if(S.openId && S.openId!==id && S.detail && S.detail.reviewTimer && S.detail.reviewTimer.startedAt){
-      var previous=S.detail;
-      fetch("/api/v1/staff/cases/"+previous.case.id+"/review-timer",{method:"POST",keepalive:true,headers:csrf(),body:JSON.stringify({version:previous.case.version,action:"pause"})});
-    }
+    var paused = S.openId && S.openId !== id ? pauseActiveReview() : Promise.resolve();
     S.openId = id;
     history.replaceState(null, "", "#case=" + encodeURIComponent(id));
-    fetch("/api/v1/staff/cases/" + id).then(function (r) { return r.json(); }).then(function (j) {
+    return paused.then(function() { return fetch("/api/v1/staff/cases/" + id); }).then(function (r) { return r.json(); }).then(function (j) {
+      if (S.openId !== id) return;
       S.detail = j;
       renderDetail(j);
     });
@@ -110,7 +128,7 @@
     var d = document.getElementById("detail");
     clear(d);
     var c = j.case;
-    d.appendChild(el("h2", c.reference + " (v" + c.version + ")"));
+    var heading = el("h2", c.reference + " (v" + c.version + ")"); d.appendChild(heading);
     var flags = el("div", null, "flags");
     flags.appendChild(flag("safety: " + readable(c.safetyStatus), c.safetyStatus === "emergency" || c.safetyStatus === "stop_use"));
     flags.appendChild(flag("workflow: " + readable(c.workflowStatus), false));
@@ -175,10 +193,13 @@
       var revised = control("Edit brief (optional)", "textarea"); revised.rows = 5;
       revised.value = latest && latest.payload.revisedBrief || "";
       var missing = control("Missing facts (one per line)", "textarea");
+      missing.value = latest ? latest.payload.missingFacts.join("\n") : "";
       var unsupported = control("Incorrect or unsupported assertions (one per line)", "textarea");
+      unsupported.value = latest ? latest.payload.unsupportedAssertions.join("\n") : "";
       var seconds = control("Active review time in seconds (optional, manually recorded)", "input"); seconds.type = "number"; seconds.min = "0";
       var measured = control("Use the paused review timer instead of manual seconds", "input"); measured.type = "checkbox";
       var note = control("Feedback note", "textarea");
+      note.value = latest && latest.payload.note || "";
       var status = el("p", ""); status.setAttribute("role", "status");
       [["ready_to_contact", "Ready to contact / plan visit"], ["need_information", "Need more information"], ["urgent_review", "Needs urgent human review"]].forEach(function(pair) {
         var b = el("button", pair[1], "btn"); b.disabled = S.user && S.user.role === "readonly";
@@ -209,22 +230,61 @@
     });
     d.appendChild(photos);
 
-    var effort=el("div",null,"card");
-    effort.appendChild(el("h3","Identity verification and active review time"));
-    var verification=(j.events||[]).filter(function(e){return e.type==="technician_identity_verified";}).slice(-1)[0];
-    effort.appendChild(el("p",verification ? "Technician verified: "+verification.payload.brand+" "+verification.payload.model+" · "+verification.createdAt : "Identity has not been verified by a technician."));
-    var brand=el("input"),model=el("input"),serial=el("input"),basis=el("select"),basisNote=el("input");
-    [[brand,"Verified brand"],[model,"Verified model"],[serial,"Verified serial (optional)"],[basisNote,"How you verified this identity"]].forEach(function(pair){var label=el("label",pair[1]);label.appendChild(pair[0]);effort.appendChild(label);});
-    ["physical_label","customer_contact","reviewed_document"].forEach(function(v){var o=el("option",v.replace(/_/g," "));o.value=v;basis.appendChild(o);});
-    var basisLabel=el("label","Verification source");basisLabel.appendChild(basis);effort.appendChild(basisLabel);
-    var verify=el("button","Record technician verification","btn secondary");
-    verify.onclick=function(){fetch("/api/v1/staff/cases/"+c.id+"/identity-verification",{method:"POST",headers:csrf(),body:JSON.stringify({version:c.version,brand:brand.value,model:model.value,serial:serial.value||null,provenance:basis.value,note:basisNote.value})}).then(function(r){if(!r.ok)throw Error("Verification failed; check fields and refresh.");return openCase(c.id);}).catch(function(e){alert(e.message);});};
+    var effort = el("section", null, "card identity-panel");
+    effort.appendChild(el("h3", "Identity verification and active review time"));
+    var verification = (j.events || []).filter(function(e) { return e.type === "technician_identity_verified"; }).slice(-1)[0];
+    var verifiedStatus = el("p", verification
+      ? "Technician verified: " + verification.payload.brand + " " + verification.payload.model + " · " + verification.createdAt
+      : "Identity has not been verified by a technician.");
+    effort.appendChild(verifiedStatus);
+    var brand = el("input"), model = el("input"), serial = el("input"), basis = el("select"), basisNote = el("input");
+    [[brand, "Verified brand", 100], [model, "Verified model", 120],
+      [serial, "Verified serial (optional)", 120], [basisNote, "How you verified this identity", 1000]].forEach(function(pair) {
+      pair[0].type = "text"; pair[0].maxLength = pair[2];
+      var label = el("label", pair[1]); label.appendChild(pair[0]); effort.appendChild(label);
+    });
+    ["physical_label", "customer_contact", "reviewed_document"].forEach(function(v) {
+      var o = el("option", v.replace(/_/g, " ")); o.value = v; basis.appendChild(o);
+    });
+    var basisLabel = el("label", "Verification source"); basisLabel.appendChild(basis); effort.appendChild(basisLabel);
+    if (verification) {
+      brand.value = verification.payload.brand; model.value = verification.payload.model;
+      serial.value = verification.payload.serial || ""; basis.value = verification.payload.provenance;
+      basisNote.value = verification.payload.note;
+    }
+    var canEdit = !(S.user && S.user.role === "readonly");
+    var verify = el("button", "Record technician verification", "btn secondary");
+    var verificationStatus = el("p", ""); verificationStatus.setAttribute("role", "status");
+    verify.disabled = !canEdit;
+    verify.onclick = function() {
+      verify.disabled = true;
+      fetch("/api/v1/staff/cases/" + c.id + "/identity-verification", {
+        method: "POST", headers: csrf(), body: JSON.stringify({version: c.version, brand: brand.value.trim(),
+          model: model.value.trim(), serial: serial.value.trim() || null, provenance: basis.value, note: basisNote.value.trim()})
+      }).then(function(r) {
+        if (!r.ok) throw Error("Verification failed; check fields and refresh.");
+        return r.json();
+      }).then(function(x) {
+        c.version = x.version; heading.textContent = c.reference + " (v" + c.version + ")";
+        verifiedStatus.textContent = "Technician verified: " + x.verification.payload.brand + " " + x.verification.payload.model + " · " + x.verification.createdAt;
+        verificationStatus.textContent = "Verification saved.";
+      }).catch(function(e) { verificationStatus.textContent = e.message; }).finally(function() { verify.disabled = !canEdit; });
+    };
     effort.appendChild(verify);
-    var timer=j.reviewTimer||{activeSeconds:0,startedAt:null};
-    effort.appendChild(el("p","Recorded active review: "+timer.activeSeconds+" seconds"+(timer.startedAt?" · timer running":" · paused")+". Manual durations are recorded separately."));
-    var toggle=el("button",timer.startedAt?"Pause active review":"Resume active review","btn secondary");
-    toggle.onclick=function(){fetch("/api/v1/staff/cases/"+c.id+"/review-timer",{method:"POST",headers:csrf(),body:JSON.stringify({version:c.version,action:timer.startedAt?"pause":"start"})}).then(function(r){if(!r.ok)throw Error("Timer changed; refresh this case.");return openCase(c.id);}).catch(function(e){alert(e.message);});};
-    effort.appendChild(toggle);d.appendChild(effort);
+    effort.appendChild(verificationStatus);
+    var timerStatus = el("p", ""); timerStatus.setAttribute("role", "status"); effort.appendChild(timerStatus);
+    var toggle = el("button", "", "btn secondary");
+    j.refreshTimer = function() {
+      var timer = j.reviewTimer || {activeSeconds: 0, startedAt: null};
+      timerStatus.textContent = j.timerError || ("Recorded active review: " + timer.activeSeconds + " seconds" +
+        (timer.startedAt ? " · timer running" : " · paused") + ". Manual durations are recorded separately.");
+      toggle.textContent = timer.startedAt ? "Pause active review" : "Resume active review";
+      toggle.disabled = !canEdit || !!j.timerRequest;
+      heading.textContent = c.reference + " (v" + c.version + ")";
+    };
+    j.refreshTimer();
+    toggle.onclick = function() { changeReviewTimer(j, j.reviewTimer && j.reviewTimer.startedAt ? "pause" : "start"); };
+    effort.appendChild(toggle); d.appendChild(effort);
 
     // Sources.
     if (snap && snap.citations && snap.citations.length) {
@@ -415,10 +475,11 @@
   document.getElementById("statusFilter").addEventListener("change", renderInbox);
   document.getElementById("tabInbox").onclick = function () {
     S.tab = "inbox";
-    document.getElementById("inboxPane").style.display = "block";
+    document.getElementById("inboxPane").style.display = "";
     document.getElementById("settings").style.display = "none";
   };
   document.getElementById("tabSettings").onclick = function () {
+    pauseActiveReview();
     S.tab = "settings";
     document.getElementById("inboxPane").style.display = "none";
     document.getElementById("settings").style.display = "block";

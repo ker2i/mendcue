@@ -158,7 +158,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     const event={id:randomUUID(),tenantId:staffTenant.id,caseId:c.id,type:"technician_identity_verified",payload:{...parsed.data,recordedBy:staffSession.userId},createdAt:new Date().toISOString()};
     const ok=await deps.store.commitCase({record:{...c,version:c.version+1},expectedVersion:parsed.data.version,events:[event],jobs:[]});
     if(!ok)return res.status(409).json(errorBody("CASE_VERSION_CONFLICT","Refresh before verifying identity.",requestId()));
-    res.status(201).json({verification:event});
+    res.status(201).json({version:c.version+1,verification:event});
   });
   app.post("/api/v1/staff/cases/:caseId/review-timer",staffAuth,requireMutate,async(req,res)=>{
     const {staffTenant,staffSession}=ctx(req);
@@ -166,6 +166,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     if(!parsed.success)return res.status(400).json(errorBody("VALIDATION_ERROR","Invalid timer action.",requestId()));
     const c=await deps.store.getCase(staffTenant.id,req.params.caseId);
     if(!c)return res.status(404).json(errorBody("NOT_FOUND","Case not found.",requestId()));
+    if(parsed.data.version!==c.version)return res.status(409).json(errorBody("CASE_VERSION_CONFLICT","Refresh before changing the timer.",requestId()));
     const events=await deps.store.listEvents(staffTenant.id,c.id);
     const timer=reviewTimer(events,staffSession.userId);
     if((parsed.data.action==="start")===!!timer.startedAt)return res.status(409).json(errorBody("TIMER_CONFLICT","Timer already in that state.",requestId()));

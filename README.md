@@ -59,7 +59,7 @@ retention, image budgets and backup/restore.
 - `src/db/` — store interface, memory + Postgres implementations, migrations, seed
 - `migrations/` — SQL schema, RLS, narrow auth paths, composite FKs
 - `tests/` — intake, safety, isolation, labels/knowledge, fallback, review regressions, PG integration
-- `scripts/browser-acceptance.mjs` — real-Chrome acceptance run (28 checks)
+- `scripts/browser-acceptance.mjs` — real-Chrome acceptance run (41 checks)
 - `docs/` — openapi, architecture, deployment, tenant-onboarding, evaluation
 - `examples/integration/` — mock webhook receiver + embed snippet
 
@@ -68,7 +68,8 @@ retention, image budgets and backup/restore.
 ```bash
 npm test          # API + engine suites (memory store) + PGlite PostgreSQL-engine integration
 npm run typecheck
-npm run build && node scripts/browser-acceptance.mjs   # needs CHROME_BIN
+npm run build && node scripts/browser-acceptance.mjs   # discovers Chrome; CHROME_BIN overrides
+node scripts/knowledge-acceptance.mjs                 # synthetic PDF checks; needs pdftotext
 ```
 
 See `docs/evaluation.md` for the 12-scenario reviewed set and pilot grading.

@@ -1,4 +1,76 @@
-# Implementation verification — October 30, 2026
+# Implementation verification — October 31, 2026
+
+Base: `33ed033`, branch `main`. Continued the implementation brief with browser,
+operator PDF and migration recovery verification. Original static demo work remains
+uncommitted; its local browser harness received portability changes only. No DNS,
+production deployment, live Meta inference, real mail or customer material was used.
+
+## Changes in this increment
+
+- Staff timer controls update in place after automatic background pauses and manual
+  start/pause, preserving unsaved corrections, missing facts and identity fields.
+  Concurrent pause triggers share one request; leaving for another case waits for
+  the pause, and opening Settings pauses review. Timer failures remain visible.
+- Identity verification returns the new case version and updates the visible status
+  without clearing a review draft. Timer mutations reject stale case versions.
+  Saved correction/missing-fact/unsupported-assertion/note fields refill on reload.
+  Read-only users have disabled timer/verification actions. Identity controls reflow
+  on phones, and returning from Settings restores the desktop inbox grid.
+- Shared browser launcher discovers Linux Chrome or Windows Chrome through WSL,
+  retains `CHROME_BIN`, and uses an isolated Windows profile with path translation
+  for local upload/download checks. Fixture browser startup failure cleans up its
+  servers. Screenshots use foreground pages to avoid background capture stalls.
+- Each migration's DDL and migration record now commit in one transaction using
+  one acquired connection. Injected failure after migration 007's DDL proves full
+  rollback, safe retry and a subsequent no-op migration run. Historical SQL files
+  remain unchanged; no new schema or environment settings are needed.
+- New `scripts/knowledge-acceptance.mjs` exercises the actual local PDF CLI using
+  a generated two-page synthetic PDF. Optional dedicated test SQL verifies publish,
+  selected-page citations, exact-model applicability and tenant isolation.
+
+## Executed checks
+
+- `npm test`: **101 passed, one container-only test skipped**, across 17 files.
+  `npm run typecheck`, `npm run build`, JS syntax and `git diff --check`: passed.
+- `node scripts/browser-acceptance.mjs`: **41/41 passed**, using installed Windows
+  Chrome 156 through WSL. Includes background pause/resume, keyboard activation,
+  Settings pause, draft preservation, reload persistence, immutable submitted
+  snapshots, private photos, tenant embeds, 320px intake/staff and a 640px reflow
+  equivalent to 200% on a 1280px display. This is not a physical-device or browser
+  UI zoom audit. The queued-memory check proves client polling, not a shared worker.
+- `SCREENSHOT_DIR=/tmp/mendcue-demo-oct31 npm run demo:test`: **22/22 passed**.
+  Static screenshots stayed outside the repository; the existing demo screenshots
+  were preserved. No static-site publication was performed.
+- Fresh actual `postgres:16-alpine` container: built migration CLI applied all eight
+  migrations. `TEST_POSTGRES_URL=<dedicated local URL>/mendcue_test npm test -- tests/pg.integration.test.ts`:
+  **12/12 passed** with the restricted runtime role. A temporary localhost relay to
+  the container bridge supported WSL connectivity. No production SQL was contacted.
+- Poppler 24.02 from user-local extracted Ubuntu packages:
+  `node scripts/knowledge-acceptance.mjs` **5/5 passed** without SQL. With the
+  dedicated container URL using `app_runtime`, **6/6 passed**, including actual CLI
+  publication. Checks cover original bytes/hash, page indexes/labels, private file
+  permissions, cleared approval flags, rejected unreviewed/unselected/tampered
+  input, retained usage basis and tenant/model boundaries. All source text and
+  review fields are explicit scripted fixtures, not real human manual approval.
+- Refreshed synthetic product screenshots inspected at `/tmp/mendcue-staff.png`
+  and `/tmp/mendcue-staff-review-phone.png`; generated images were not committed.
+
+## Remaining external verification
+
+Full Compose build/boot and Compose-volume restore remain unexecuted. Node 20
+Alpine pulls failed from Docker Hub (connection refused) and the public ECR mirror
+(repeated downloads ending in EOF). The successful PostgreSQL container checks do
+not establish a full deployment or backup rehearsal.
+
+VPS/Caddy/TLS, actual business configuration and website origins, SMTP inbox receipt,
+reviewed real manuals, capped live Meta text/images/complete briefs, and real
+technician cases/grades/effort/outcomes remain unverified. The earlier separate-process
+SQL restart and dump/restore smoke below is historical local evidence. Synthetic
+fixtures establish mechanics, not accuracy, readability or time savings.
+
+---
+
+# Previous implementation verification — October 30, 2026
 
 Base: `e1e94ac`, branch `main`. No repository AGENTS.md was found. The original
 static-demo working tree was preserved and excluded from this implementation commit.

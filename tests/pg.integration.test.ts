@@ -33,7 +33,11 @@ beforeAll(async () => {
     const url = new URL(process.env.TEST_POSTGRES_URL);
     if (!["localhost", "127.0.0.1"].includes(url.hostname) || !url.pathname.startsWith("/mendcue_test")) throw new Error("Container tests require a dedicated local mendcue_test database");
     const owner = new Pool({connectionString:url.href});
-    try { await applyMigrations((sql,params)=>owner.query(sql,params),(sql)=>owner.query(sql)); }
+    try {
+      const client=await owner.connect();
+      try { await applyMigrations((sql,params)=>client.query(sql,params),(sql)=>client.query(sql)); }
+      finally { client.release(); }
+    }
     finally { await owner.end(); }
     url.username="app_runtime";url.password="change_me_in_production";
     runtimePool = new Pool({connectionString:url.href});

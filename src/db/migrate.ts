@@ -14,14 +14,22 @@ export function loadMigrationFiles(): MigrationFile[] {
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
 
+// Both callbacks must use the same connection: DDL and its record commit together.
 export async function applyMigrations(query: QueryFn, exec: (sql: string) => Promise<unknown>): Promise<string[]> {
   await query(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   const applied = new Set((await query("SELECT name FROM schema_migrations")).rows.map((r) => r.name as string));
   const done: string[] = [];
   for (const f of loadMigrationFiles()) {
     if (applied.has(f.name)) continue;
-    await exec(f.sql);
-    await query("INSERT INTO schema_migrations(name) VALUES($1) ON CONFLICT DO NOTHING", [f.name]);
+    await query("BEGIN");
+    try {
+      await exec(f.sql);
+      await query("INSERT INTO schema_migrations(name) VALUES($1)", [f.name]);
+      await query("COMMIT");
+    } catch (error) {
+      await query("ROLLBACK");
+      throw error;
+    }
     done.push(f.name);
   }
   return done;
@@ -30,10 +38,13 @@ export async function applyMigrations(query: QueryFn, exec: (sql: string) => Pro
 export async function migrate(databaseUrl: string): Promise<string[]> {
   const pool = new Pool({ connectionString: databaseUrl });
   try {
-    return await applyMigrations(
-      (sql, params) => pool.query(sql, params as never[]) as Promise<{ rows: Array<Record<string, unknown>> }>,
-      (sql) => pool.query(sql)
-    );
+    const client = await pool.connect();
+    try {
+      return await applyMigrations(
+        (sql, params) => client.query(sql, params as never[]) as Promise<{ rows: Array<Record<string, unknown>> }>,
+        (sql) => client.query(sql)
+      );
+    } finally { client.release(); }
   } finally {
     await pool.end();
   }

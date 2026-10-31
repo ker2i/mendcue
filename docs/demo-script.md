@@ -19,6 +19,10 @@ This is a working software demonstration, not pilot evidence of time savings.
 6. Record a real demonstration staff decision and optional correction/review time.
    Say it is an operator demo action, not a pilot technician grade. Show that the
    submitted original remains unchanged and the review is an additional event.
+   Demonstrate the separate identity-verification control and its stated source.
+   Start/pause the active timer; switching away or opening Settings pauses it.
+   Return to the case with unsaved corrections intact, then save measured effort
+   or explicitly separate manual seconds. These demonstration timings are not savings.
 7. Open the second tenant embedded from the actual separate origin. Explain
    tenant configuration and private media access.
 8. Show a gas-smell scenario interrupting intake with a persistent safety notice.

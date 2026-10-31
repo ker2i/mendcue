@@ -62,7 +62,10 @@ it("persists identity verification and measured timer events without mutating su
  const login=await request(app).post("/api/v1/staff/login").send({tenantSlug:tenant.slug,email:"tech@demo-phoenix.invalid",password:"demo-tech-1234"});
  const cookies=(login.headers["set-cookie"] as unknown as string[]).map(x=>x.split(";")[0]).join("; ");
  const post=async(path:string,body:Record<string,unknown>)=>request(app).post(`/api/v1/staff/cases/${c.id}/${path}`).set("cookie",cookies).set("x-csrf-token",login.body.csrf).send({version:(await store.getCase(tenant.id,c.id))!.version,...body});
- expect((await post("identity-verification",{brand:"LG",model:"WM3900HBA",serial:null,provenance:"physical_label",note:"Read the physical rating label"})).status).toBe(201);
+ const verification=await post("identity-verification",{brand:"LG",model:"WM3900HBA",serial:null,provenance:"physical_label",note:"Read the physical rating label"});
+ expect(verification.status).toBe(201);expect(verification.body.version).toBe((await store.getCase(tenant.id,c.id))!.version);
+ const staleTimer=await request(app).post(`/api/v1/staff/cases/${c.id}/review-timer`).set("cookie",cookies).set("x-csrf-token",login.body.csrf).send({version:verification.body.version-1,action:"start"});
+ expect(staleTimer.status).toBe(409);expect((await store.listEvents(tenant.id,c.id)).filter(e=>e.type==="review_timer")).toHaveLength(0);
  expect((await post("review-timer",{action:"start"})).status).toBe(201);
  expect((await post("review-timer",{action:"start"})).status).toBe(409);
  expect((await post("review-timer",{action:"pause"})).status).toBe(201);
