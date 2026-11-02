@@ -1,99 +1,153 @@
-# MendCue (hackathon scope)
+# MendCue
 
-From customer symptoms to repair-ready handoffs. Tenant-aware appliance
-service intake: one shared engine serves an embedded widget, a hosted
-business site, a staff dashboard, and a REST API.
+MendCue turns appliance symptoms into a service request a technician can review
+before a visit. It includes an embeddable website chat, a hosted intake page, a
+technician workspace with internal scheduling, and a REST API.
 
-> Demonstration build. Two clearly labeled demo businesses are seeded; no
-> real company details are included. **Not insurer production ready. No
-> universal appliance knowledge is claimed** — model-specific guidance
-> depends on available approved documentation.
+Live AI uses Meta Muse Spark (`muse-spark-1.3`) for structured fact extraction and
+draft assessments. A separate, visibly labeled fixture mode runs without an API
+key. Photo transcription requires live mode and an explicit image-billing gate.
+Manufacturer manuals are operator-imported and reviewed; the included example
+playbooks do not establish model-specific coverage.
 
-## Quick start
+## Prerequisites
 
-Two local modes. Pick one.
+| Task | Requirements |
+| --- | --- |
+| Local demo | Git, Node.js 20 or newer, npm; Linux, macOS, or Windows with WSL |
+| HTTPS deployment | An always-on Linux server, Git, Docker Engine with Compose v2, a domain, DNS access, and available ports 80/443 |
+| Live AI | A Meta Model API key with access to `muse-spark-1.3` and an intentional spending allowance |
+| Browser checks | Chrome or Chromium; set `CHROME_BIN` if it is not discovered automatically |
+| Importing manuals | Node/npm and Poppler's `pdftotext` on the operator workstation |
 
-**Mode A — single process, in-memory store (no database):**
+Check local tools with `node --version` and `npm --version`. For deployment, check
+`docker --version` and `docker compose version`. Docker users do not need Node on
+the server; the image includes it. OpenSSL is used to generate deployment secrets.
+
+## Run a local demo
+
+This is the quickest way to reproduce the application. No Docker, database, domain,
+or Meta key is needed. Commands below use a Bash-compatible shell.
 
 ```bash
-npm install
+git clone https://github.com/ker2i/mendcue.git
+cd mendcue
+npm ci
+npm run build
+NODE_ENV=development DATABASE_URL= MODEL_PROVIDER=fixture SYNC_TURNS=1 \
+  PORT=3000 APP_BASE_URL=http://localhost:3000 MEDIA_STORAGE_PATH=./data/media \
+  node dist/server/index.js
+```
+
+Open:
+
+- Customer intake: <http://localhost:3000/business/demo-phoenix-appliance>
+- Technician workspace: <http://localhost:3000/staff/>
+- Health: <http://localhost:3000/healthz>
+
+Use these **synthetic local credentials** in the technician sign-in form:
+
+| Field | Value |
+| --- | --- |
+| Business slug | `demo-phoenix-appliance` |
+| Email | `tech@demo-phoenix.invalid` |
+| Password | `demo-tech-1234` |
+
+Try: “My LG washer stops with water inside and shows OE.” Answer the questions with
+synthetic details, review the request, and submit. Sign into the technician workspace
+to open the same request, review its brief, add a note, and create an internal
+appointment. Fixture replies are deterministic; they do not demonstrate live AI or
+photo recognition. Restarting this local mode resets cases and users; uploaded
+files remain under ignored `data/` until removed.
+
+Do not copy `.env.example` for this local mode. That template is for deployment.
+The command above explicitly selects development, memory storage, and synchronous
+processing even if deployment variables exist in your shell or `.env`.
+
+## Deploy with HTTPS and PostgreSQL
+
+Follow the [deployment guide](docs/deployment.md). It covers:
+
+1. Domain/DNS and Docker prerequisites.
+2. Private environment settings and generated secrets.
+3. Building the image, applying migrations, and setting the runtime database password.
+4. Provisioning your business and a private owner account.
+5. Starting web, worker, and HTTPS services and checking the result.
+
+On the server, clone the repository as above, then:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# Edit .env: set your HTTPS hostname and four different generated secrets.
+# Use openssl rand -hex 32 for each password/secret. See the guide's settings table.
+docker compose build
+docker compose up -d --wait postgres
+docker compose run --rm migrate
+docker compose exec postgres psql -U intake -d intake -c '\password app_runtime'
+```
+
+At the password prompt, enter the exact `APP_RUNTIME_PASSWORD` saved in `.env`.
+Next, [provision your business and owner](docs/deployment.md#4-provision-a-business-and-owner),
+then start the application:
+
+```bash
+docker compose up -d web worker caddy
+docker compose ps
+```
+
+Open `https://YOUR-HOST/business/YOUR-SLUG` and
+`https://YOUR-HOST/staff/?business=YOUR-SLUG`. Start with fixture inference to check
+the deployment, then enable live Meta with an explicit allowance. For a synthetic
+judge deployment, the guide also explains how to seed the published demo accounts.
+
+The guide covers Cloudflare Tunnel, backups, updates, notifications, and common
+startup errors. Keep keys, customer data, completed tenant configuration, and
+backups outside Git.
+
+## Connect a website
+
+After provisioning a business, add its website origin to the tenant's allowlist
+and insert the widget script. See the [integration guide](docs/integration.md) for
+hosted links, embedding, the included QuickFIX website connector, and API/webhook
+integration. The [API specification](docs/openapi.yaml) describes the endpoints.
+
+Additional operator guides:
+
+- [Technician app, scheduling, and notifications](docs/technician-app.md)
+- [Reviewed document import](docs/knowledge-import.md)
+
+`demo-site/` is a separate static, scripted product walkthrough; it makes no model
+calls and submits no requests. `quickfix-site/` contains the public business website
+integration. Neither static site can host the Express backend.
+
+## Verify the application
+
+```bash
+npm run typecheck
 npm test
 npm run build
-PORT=3000 APP_BASE_URL=http://localhost:3000 MODEL_PROVIDER=fixture SYNC_TURNS=1 node dist/server/index.js
+node scripts/browser-acceptance.mjs
+node scripts/technician-browser-acceptance.mjs
+npm run quickfix:test
 ```
 
-**Mode B — full stack with Postgres (Docker Compose):**
+The first three commands need no browser or Meta key. Browser checks use synthetic
+fixtures and an isolated local application. The optional actual-PostgreSQL tests
+require `TEST_POSTGRES_URL` pointing to a dedicated local database whose name starts
+with `mendcue_test`; never point test commands at a customer database.
 
-```bash
-cp .env.example .env   # then edit .env: passwords, domain, keys
-docker compose build
-docker compose --profile seed up -d postgres migrate seed
-docker compose up -d
-```
+## Project layout
 
-- Hosted pilot site: http://localhost:3000/business/demo-phoenix-appliance
-- Second tenant: http://localhost:3000/business/demo-harbor-warranty
-- Staff: http://localhost:3000/staff
-  (`tech@demo-phoenix.invalid` / `demo-tech-1234`,
-  `dispatch@demo-harbor.invalid` / `demo-dispatch-1234`)
-- API spec: `docs/openapi.yaml`
-- Health: `GET /healthz`
+- `src/` — application, Meta adapter, operator tools, and worker
+- `migrations/` — PostgreSQL schema and tenant isolation
+- `tests/` — automated checks
+- `scripts/` — build verification, document import, diagnostics, and backup tools
+- `docs/` — deployment and integration/operator guides, configuration template, API spec
+- `examples/integration/` — widget and webhook examples
+- `demo-site/`, `quickfix-site/` — static website code and bundled font licenses
 
-Live Meta calls: set `MODEL_PROVIDER=live` + `MODEL_API_KEY`
-(Standard mode, `muse-spark-1.3` at `https://api.meta.ai/v1`).
-Choose `MODEL_PROVIDER=fixture` explicitly for a labeled development fixture.
-Live mode without a key fails startup. Web and worker share the same validated
-configuration; production requires durable SQL and private persistent media.
-See [deployment and operations](docs/deployment.md) for provisioning, SMTP, retries,
-retention, image budgets and backup/restore.
-
-## Layout
-
-- `src/domain/` — intake engine, safety, questions/actions, knowledge, facts
-- `src/integrations/meta/` — provider contract, live Meta adapter, fixture
-- `src/domain/` — intake engine, safety, questions/actions, knowledge, facts
-- `src/integrations/meta/` — provider contract, live Meta adapter, fixture
-- `src/server/` — API, staff/integration auth, page shells
-- `src/server/ui/` — shared CSS + dependency-free clients (widget, intake, staff, hosted)
-- `src/worker/` — durable job processing (turns, labels, webhooks)
-- `src/db/` — store interface, memory + Postgres implementations, migrations, seed
-- `migrations/` — SQL schema, RLS, narrow auth paths, composite FKs
-- `tests/` — intake, safety, isolation, labels/knowledge, fallback, review regressions, PG integration
-- `scripts/browser-acceptance.mjs` — real-Chrome acceptance run (41 checks)
-- `docs/` — openapi, architecture, deployment, tenant-onboarding, evaluation
-- `examples/integration/` — mock webhook receiver + embed snippet
-
-## Verification
-
-```bash
-npm test          # API + engine suites (memory store) + PGlite PostgreSQL-engine integration
-npm run typecheck
-npm run build && node scripts/browser-acceptance.mjs   # discovers Chrome; CHROME_BIN overrides
-node scripts/knowledge-acceptance.mjs                 # synthetic PDF checks; needs pdftotext
-```
-
-See `docs/evaluation.md` for the 12-scenario reviewed set and pilot grading.
-
-The next-upgrade implementation and honest remaining work are recorded in
-[verification-latest](docs/verification-latest.md). See the
-[local document import workflow](docs/knowledge-import.md),
-[paired benchmark protocol](docs/benchmark-method.md), and
-[private case collection template](docs/pilot-case-template.md).
-Live mode uses a shared local spending ledger (default $2 lifetime cap,
-$0.50 per case); unknown usage blocks further requests. Reconcile failed
-requests with provider billing before resetting it. Live vision requires
-reviewed billing configuration; manual identity entry remains available.
-
-## Public product demo (GitHub Pages)
-
-A modern static landing page and interactive, clearly labeled synthetic walkthrough
-live in [`demo-site/`](demo-site/README.md). Run `npm run demo:preview` to preview
-and `npm run demo:test` for browser checks. The included Pages workflow publishes
-only that directory; no server or Meta key is required. See the demo README for
-free hosting setup and its explicit simulation boundaries.
-
-## QuickFIX website connection
-
-The actual repairman’s site in `quickfix-site/` can load the existing MendCue widget.
-See [QuickFIX integration](docs/quickfix-integration.md) for tenant provisioning,
-optional Cloudflare Tunnel, public configuration and browser verification.
+Appointments are internal records; they do not send customer confirmations or create
+external calendar events. Email and push require separate configuration. Live
+inference, fixture checks, and real technician outcomes are distinct evidence;
+no accuracy or time-savings result is implied by the included examples.

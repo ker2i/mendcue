@@ -21,7 +21,7 @@ const images=sample.images.map(path=>{const full=resolve(dirname(file),path);if(
 let activeSystem=null;const rawOutputs={};
 const provider=new MetaProvider(process.env.MODEL_API_KEY,(operation,raw)=>{rawOutputs[activeSystem]={operation,raw};});
 const prepared=await prepareComparison({...sample,images},provider);
-const baseline=readFileSync('docs/baseline-prompt.md','utf8');
+const baseline=readFileSync(new URL('../src/evaluation/baseline-prompt.md', import.meta.url),'utf8');
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const run={id:randomUUID(),kind:sample.kind,comparison:'A_fixed_input_complete_brief',model:'muse-spark-1.3',createdAt:new Date().toISOString(),baselinePromptHash:hash(baseline),
  versions:Object.fromEntries(['src/domain/intake.ts','src/domain/brief.ts','src/domain/brief-review.ts','src/integrations/meta/meta.ts','src/evaluation/product-comparison.ts'].map(p=>[p,hash(readFileSync(p))])),

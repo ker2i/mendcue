@@ -1,4 +1,4 @@
-// REVIEW.md regression scenarios: R01 safety-before-confirmation, R09 loops.
+// Intake regression scenarios: R01 safety-before-confirmation, R09 loops.
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { mkdtempSync } from "node:fs";

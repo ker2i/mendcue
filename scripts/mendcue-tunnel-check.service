@@ -1,9 +1,0 @@
-[Unit]
-Description=Check public MendCue intake and recover a stale tunnel
-
-[Service]
-Type=oneshot
-WorkingDirectory=%h/mendcue-fixture
-ExecStart=/bin/bash %h/mendcue-fixture/scripts/check-tunnel.sh
-TimeoutStartSec=60
-UMask=0077

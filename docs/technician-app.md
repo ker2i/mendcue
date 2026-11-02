@@ -7,14 +7,14 @@ to the canonical URL while retaining its fragment.
 
 ## Technician use
 
-Open `https://intake.quickfixphx.com/staff/?business=quickfix-phoenix` in Android
-Chrome and sign in with the existing owner account. Tap **Install app**, or use
+Open `https://intake.example.com/staff/?business=YOUR-SLUG` in Android
+Chrome and replace the hostname/slug, and sign in with your provisioned owner account. Tap **Install app**, or use
 Chrome's **Add to home screen / Install app** menu when a prompt isn't available.
 Use **New requests**, **Active jobs** and **All requests** to manage the inbox;
 search and Load more operate on bounded server summaries.
 
 Open a submitted request and choose **Book an appointment**. Both dates/times use
-the business timezone (QuickFIX: America/Phoenix), independent of the phone or VPS
+the business timezone (for example, America/Phoenix), independent of the phone or VPS
 clock. Choose a technician, start/end time, visit note and optional reminder. Visits
 must be future, within one year, and last 15 minutes–12 hours. Overlapping active
 visits for the same technician are rejected atomically, including concurrent saves.

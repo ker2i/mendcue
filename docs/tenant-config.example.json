@@ -1,7 +1,7 @@
 {
-  "id": "tenant_replace_me",
-  "slug": "replace-business-slug",
-  "name": "Replace with real business name",
+  "id": "tenant_example_repair",
+  "slug": "example-repair",
+  "name": "Example Appliance Repair",
   "demoLabel": "",
   "orgType": "solo_repair",
   "branding": {
@@ -16,7 +16,10 @@
   "languages": [
     "en"
   ],
-  "allowedOrigins": [],
+  "allowedOrigins": [
+    "https://example.com",
+    "https://www.example.com"
+  ],
   "publicKey": "pk_replace_with_random_public_key",
   "categories": [
     "refrigerator",
@@ -33,18 +36,7 @@
     "washer",
     "dishwasher"
   ],
-  "serviceZips": [
-    "85001",
-    "85002",
-    "85003",
-    "85004",
-    "85006",
-    "85008",
-    "85012",
-    "85014",
-    "85015",
-    "85016"
-  ],
+  "serviceZips": null,
   "requireStreetAddress": false,
   "requiredFields": [
     "appliance_category",
@@ -71,9 +63,9 @@
     "closedDays": 90,
     "logDays": 14
   },
-  "privacyText": "Demo intake. Do not submit real personal data. Intake is stored for the demonstration only.",
-  "openingMessage": "I'm the AI intake assistant for Demo Phoenix Appliance Service (DEMO). I'll collect details about your appliance problem and prepare them for the service team. You can ask for a person at any time.",
-  "gasUtilityContact": "Southwest Gas emergency line (configure per service area)",
+  "privacyText": "Replace with your business privacy notice, including how service request details and optional photos are processed and retained.",
+  "openingMessage": "I'm the AI intake assistant for Example Appliance Repair. Tell me about your appliance problem and I will prepare a request for the service team.",
+  "gasUtilityContact": "Replace with the correct utility emergency contact for your service area.",
   "featureFlags": {
     "photos": true,
     "knowledge": true,

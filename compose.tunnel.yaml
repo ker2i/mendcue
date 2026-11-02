@@ -1,11 +1,11 @@
 # Optional outbound HTTPS access for a VPS behind a gateway.
-# In Cloudflare, route intake.quickfixphx.com to http://web:3000.
+# In Cloudflare, route your backend hostname to http://web:3000.
 # Start named services (web worker cloudflared), leaving Caddy stopped.
 services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    # QUIC connections repeatedly timed out on this VPS network. Use TCP.
+    # Use TCP transport for networks that restrict QUIC.
     command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run"]
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set the private Cloudflare tunnel token}

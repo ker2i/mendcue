@@ -38,4 +38,4 @@ const server = http.createServer(async (req, res) => {
   res.end("ok");
 });
 
-server.listen(4100, () => console.log("Mock receiver on http://localhost:4100 — secret:", SECRET));
+server.listen(4100, () => console.log("Mock receiver on http://localhost:4100"));

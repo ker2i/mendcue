@@ -16,7 +16,7 @@ if(!file) throw new Error('Usage: GLOBAL_AI_SPEND_LIMIT=<explicit cap> node scri
 const sample=schema.parse(JSON.parse(readFileSync(file,'utf8')));
 if(sample.images.length) throw new Error('Image parity is not implemented in this runner; do not omit images to claim an image comparison');
 if(!process.env.GLOBAL_AI_SPEND_LIMIT || !process.env.MODEL_API_KEY) throw new Error('An explicit comparison cap and server-side Meta key are required');
-const baseline=readFileSync('docs/baseline-prompt.md','utf8');
+const baseline=readFileSync(new URL('../src/evaluation/baseline-prompt.md', import.meta.url),'utf8');
 const provider=new MetaProvider(process.env.MODEL_API_KEY);
 const run={id:randomUUID(),kind:sample.kind,comparison:'A_fixed_input_text',model:'muse-spark-1.3',baselinePromptHash:createHash('sha256').update(baseline).digest('hex'),createdAt:new Date().toISOString(),input:sample.input,outputs:{},order:randomInt(2)?['baseline','mendcue']:['mendcue','baseline']};
 mkdirSync(output,{recursive:true,mode:0o700});

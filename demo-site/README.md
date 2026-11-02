@@ -40,7 +40,7 @@ this public demo intentionally runs without either.
 The workflow uses the official configure/upload/deploy Pages actions and scoped
 `pages: write` / `id-token: write` permissions. See
 [GitHub’s workflow documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
-Deployment has not been triggered by preparing these files.
+The workflow deployment result supplies the published URL.
 
 ## Demo boundaries
 
