@@ -1,3 +1,7 @@
+# Technician app — November 1, 2026
+
+See [technician-app-verification.md](technician-app-verification.md) for the deployed phone app, scheduling, actual PostgreSQL and browser checks, and precise physical-device checks still outstanding. Earlier records below are historical.
+
 # Implementation verification — October 31, 2026
 
 Base: `33ed033`, branch `main`. Continued the implementation brief with browser,

@@ -134,7 +134,7 @@ describe("R03 stored markup cannot reach a staff HTML sink", () => {
     const staffJs = await request(app).get("/static/staff.js");
     expect(staffJs.text).toContain("textContent");
     // Pages are served under a restrictive CSP with no inline scripts.
-    const page = await request(app).get("/staff");
+    const page = await request(app).get("/staff/");
     expect(page.status).toBe(200);
     expect(page.headers["content-security-policy"] as string).toContain("script-src 'self'");
     expect(page.text).not.toContain("<script>");

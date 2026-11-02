@@ -1,3 +1,4 @@
+import { pushConfig } from "./integrations/push.js";
 // One startup policy shared by the web and worker. Never infer live mode from a key.
 import { isAbsolute } from "node:path";
 import { Pool } from "pg";
@@ -9,6 +10,7 @@ import { FixtureProvider } from "./integrations/meta/fixture.js";
 import { MetaProvider } from "./integrations/meta/meta.js";
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
+  pushConfig(env);
   const production = env.NODE_ENV === "production";
   const mode = env.MODEL_PROVIDER?.trim();
   if (mode !== "fixture" && mode !== "live") throw new Error("MODEL_PROVIDER must explicitly be fixture or live");

@@ -194,3 +194,114 @@ Verify tenant isolation, staff login, known case reference, attachments, queued 
 worker health and ledger continuity after restore. Record rehearsal date and expiry.
 Local container PostgreSQL checks and VPS/Compose/TLS checks are separate evidence;
 see [verification-latest.md](verification-latest.md).
+
+## Technician app
+
+The Android home-screen app uses `/staff/`; see [technician-app.md](technician-app.md)
+for installation, scheduling, opt-in VAPID push and privacy/cache boundaries. Apply
+migration 009 with the owner role and rebuild both web and worker. Keep matching
+persistent VAPID keys privately on both processes; `PUSH_ENABLED` defaults off.
+
+### Tunnel interruption, 2026-11-01
+
+The VPS, web, worker and database remained running and healthy during investigation.
+Cloudflared logged simultaneous QUIC timeouts on all four connections at 03:56:34
+and 08:10:58 UTC; a public request also timed out during the latter incident.
+The tunnel recovered automatically, but this is evidence of intermittent tunnel
+connectivity rather than the VPS sleeping. The underlying network cause is unconfirmed.
+
+Deployed `--protocol http2` in `compose.tunnel.yaml` to use TCP instead of QUIC
+on this VPS network. Recreated only cloudflared; all four connections registered
+with HTTP/2. Three consecutive external health checks returned 200, and the live
+QuickFIX customer widget opened successfully. This short check does not establish
+long-term availability. Cloudflare documents this transport option at
+https://developers.cloudflare.com/tunnel/troubleshooting/.
+
+### Repeated interruption and automatic recovery, 2026-11-01 14:22 UTC
+
+A later failure returned HTTP 530 / Cloudflare error 1033 from both the operator
+machine and the VPS. Local `/healthz` returned 200. Cloudflared's `/ready` still
+reported four connections and its metrics reported four HA connections despite
+public routing being unavailable. HTTP/2 alone therefore did not prevent this
+failure. Restarting only cloudflared restored public HTTP 200. The exact cause of
+the stale connection state remains unconfirmed.
+
+Installed `scripts/check-tunnel.sh` as a user systemd oneshot service and
+`mendcue-tunnel-check.timer`, enabled every minute with user lingering already
+active. The monitor tests the actual public HTTPS health URL, independent of the
+tunnel's own readiness signal. It reconnects only cloudflared after three
+consecutive public failures while the local origin is healthy, with a ten-minute
+restart cooldown and a lock against overlapping checks. Local origin failures
+reset the failure count and do not restart the tunnel. No app or database restart
+is performed. Network or Cloudflare outages can still prevent immediate recovery.
+
+Mocked curl/docker execution verified the healthy path, three-failure threshold,
+cooldown, unhealthy-origin guard, reset on recovery, and a later recovery after
+the cooldown. Shell syntax and whitespace checks passed. The installed service
+completed successfully on its first real public check. Monitor with:
+
+```sh
+systemctl --user list-timers mendcue-tunnel-check.timer
+journalctl --user -u mendcue-tunnel-check.service
+```
+
+To disable automatic recovery:
+
+```sh
+systemctl --user disable --now mendcue-tunnel-check.timer
+```
+
+### Hosting pause identified, 2026-11-01 18:42 UTC
+
+The earlier assumption that the VPS remained continuously online was incorrect.
+At this incident the user timer journal stopped at 14:54:46 UTC and did not run
+again until 18:42:43 UTC, immediately after operator SSH access. The timer remained
+enabled and active, and its next monotonic expiry continued from the resumed VM.
+Public health returned 530/1033 before reconnecting cloudflared, then 200 after.
+This is strong evidence of whole-machine suspension and wake, rather than simply
+a dead tunnel. Exact provider lifecycle events require hosting account access.
+
+Provider: InstaBox; machine ID `m_agqwyy3dqjybggk7bfd4uakhky`.
+Official documentation confirms idle auto-pause, SSH wake and maximum-runtime
+pauses. A Cloudflare tunnel running inside a paused VM cannot receive a visitor
+request to wake that VM, and an internal timer cannot run while it is paused.
+https://instabox.sh/docs/idle-suspend.md
+https://instabox.sh/docs/machines.md#auto-pause
+
+Durable resolution requires hosting control-plane access: on a suitable paid
+plan set auto-suspend to 0 and verify maximum runtime is unlimited (-1), or move
+the deployment to an always-on host. CLI commands for an authenticated operator:
+
+```sh
+instabox auto-suspend m_agqwyy3dqjybggk7bfd4uakhky 0
+instabox max-run m_agqwyy3dqjybggk7bfd4uakhky -1
+```
+
+No account API key or authenticated InstaBox CLI was found in the local operator
+configuration, environment or remote standard CLI configuration. Only SSH access
+is available. Account plan and lifecycle settings are not yet verified or changed.
+No subscription or billing changes were made. The site was restored temporarily;
+this incident is not resolved until hosting lifecycle changes are verified without
+an SSH session after the idle interval. An always-on setting also needs the usual
+checks for provider availability; it does not guarantee zero downtime.
+
+### Time4VPS migration, 2026-11-02
+
+The live QuickFIX backend now runs on Time4VPS in `/opt/mendcue-quickfix/app`,
+Compose project `quickfix-live`. The site's existing Cloudflare tunnel and URL
+are unchanged. PostgreSQL and media were copied with all old containers stopped;
+the source and destination archive SHA-256 matched. A private cutover archive is
+retained at `/opt/mendcue-quickfix/cutover.tar.gz` and on the original host under
+`mendcue-fixture/backups/`. This is a point-in-time backup, not ongoing backup.
+The original containers remain stopped; do not start the old worker or tunnel
+alongside the new stack. The source environment file and current customer data
+are sensitive. Keep backups private and configure recurring off-server backups.
+
+Compose is isolated at `/opt/mendcue-quickfix/compose-tool/usr/libexec/docker/cli-plugins/docker-compose`.
+Use `-p quickfix-live -f compose.yaml -f compose.tunnel.yaml` from the app directory.
+Docker's restart policies apply after reboot. System timer
+`mendcue-quickfix-tunnel-check.timer` checks the container origin and public health;
+after three consecutive public failures it restarts only the tunnel, with a cooldown.
+The initial manual watchdog run and timer enablement succeeded. The service, worker,
+and database reported healthy; public `/healthz`, business page, and widget returned
+HTTP 200. No live AI inference or new customer submission was performed after cutover.

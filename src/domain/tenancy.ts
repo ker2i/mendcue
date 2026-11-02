@@ -37,8 +37,8 @@ export const ORG_DEFAULTS: Record<
 
 export function openingMessageFor(businessName: string): string {
   return (
-    `I'm the AI intake assistant for ${businessName}. ` +
-    `I'll collect details about your appliance problem and prepare them for the service team. ` +
-    `You can ask for a person at any time.`
+    `Hi! I'm MendCue, the AI repair assistant for ${businessName}.\n\n` +
+    `I'll ask a few quick questions about your appliance and put the details together for your technician. You can ask for a person at any time.\n\n` +
+    `Which appliance needs help, and what's happening?`
   );
 }

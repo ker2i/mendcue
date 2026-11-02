@@ -223,6 +223,10 @@ it.skipIf(!process.env.TEST_POSTGRES_URL)("serializes concurrent SQL submissions
   expect(results.map(r=>r.handoffVersion)).toEqual([1,1,1,1,1]);
   expect(await store.listHandoffs(tenant.id,c.id)).toHaveLength(1);
   expect((await store.listJobs(tenant.id)).filter(j=>j.caseId===c.id&&j.kind==="webhook")).toHaveLength(1);
+  const baseUser=(await store.listStaffUsers(tenant.id))[0],user={...baseUser,id:randomUUID(),email:'synthetic-'+randomUUID()+'@example.invalid'};await store.saveStaffUser(user);const a=await createCase(deps,tenant,'widget'),b=await createCase(deps,tenant,'widget');
+  const visits=await Promise.allSettled([a,b].map(c=>store.commitCase({record:{...c,version:c.version+1},expectedVersion:c.version,events:[],jobs:[],appointment:{tenantId:tenant.id,caseId:c.id,technicianId:user.id,startsAt:'2027-02-05T17:00:00.000Z',endsAt:'2027-02-05T18:00:00.000Z',timezone:tenant.timezone,active:true,note:'Synthetic concurrent SQL booking',reminderMinutes:null,updatedAt:new Date().toISOString()}})));
+  expect(visits.filter(r=>r.status==='fulfilled')).toHaveLength(1);expect(visits.filter(r=>r.status==='rejected')).toHaveLength(1);
+
 });
 
 it("persists endpoint progress under a stable UUID event and isolates delivery lookup",async()=>{
@@ -249,4 +253,35 @@ it("expires only scoped inactive SQL cases and atomically retains private deleti
  expect(await store.getCase(tenant.id,old.id)).toBeNull();expect(await store.getCase(tenant.id,active.id)).not.toBeNull();expect(await store.getCase(other.id,foreign.id)).not.toBeNull();
  expect(await store.listAttachments(tenant.id,old.id)).toHaveLength(0);
  expect((await store.listJobs(tenant.id)).some(j=>j.kind==="storage_delete"&&j.caseId===null&&(j.payload.keys as string[]).includes(`${old.id}/private.webp`))).toBe(true);
+});
+
+it('commits collision-safe appointments, mutation receipts and tenant-isolated calendar rows on SQL',async()=>{
+ const {AppointmentOverlap}=await import('../src/domain/appointments.js');
+ const tenant=(await store.getTenantBySlug('demo-phoenix-appliance'))!,other=(await store.getTenantBySlug('demo-harbor-warranty'))!;
+ const deps={store,provider:new FixtureProvider(),storageGet:async()=>null};
+ const a=await createCase(deps,tenant,'hosted'),b=await createCase(deps,tenant,'hosted');const baseUser=(await store.listStaffUsers(tenant.id))[0],user={...baseUser,id:randomUUID(),email:'synthetic-'+randomUUID()+'@example.invalid'};await store.saveStaffUser(user);
+ const now=new Date().toISOString();const mutationId=randomUUID();
+ const appointment={tenantId:tenant.id,caseId:a.id,technicianId:user.id,startsAt:'2027-01-03T17:00:00.000Z',endsAt:'2027-01-03T18:00:00.000Z',timezone:tenant.timezone,active:true,note:'Synthetic SQL appointment',reminderMinutes:30,updatedAt:now};
+ const receipt={id:randomUUID(),tenantId:tenant.id,caseId:a.id,type:'staff_mutation_receipt',payload:{recordedBy:user.id,clientMutationId:mutationId,hash:'synthetic',result:{version:a.version+1}},createdAt:now};
+ expect(await store.commitCase({record:{...a,version:a.version+1},expectedVersion:a.version,events:[receipt],jobs:[],appointment})).toBe(true);
+ await expect(store.commitCase({record:{...b,version:b.version+1},expectedVersion:b.version,events:[],jobs:[],appointment:{...appointment,caseId:b.id}})).rejects.toBeInstanceOf(AppointmentOverlap);
+ expect((await store.getCase(tenant.id,b.id))!.version).toBe(b.version);
+ expect(await store.listAppointments(other.id)).toEqual([]);expect((await store.listAppointments(tenant.id)).some(x=>x.caseId===a.id)).toBe(true);
+ expect((await store.findMutationReceipt(tenant.id,user.id,mutationId))?.caseId).toBe(a.id);expect(await store.findMutationReceipt(other.id,user.id,mutationId)).toBeNull();
+ const summary=await store.listInbox(tenant.id,{view:'all',search:a.reference,offset:0,limit:1});expect(summary).toHaveLength(1);expect(summary[0].id).toBe(a.id);
+ const reminderId=randomUUID();await store.enqueueJob({id:reminderId,tenantId:tenant.id,caseId:a.id,kind:'staff_reminder',payload:{type:'appointment_reminder'},status:'pending',attempts:0,maxAttempts:5,leaseUntil:null,lastError:null,createdAt:now,updatedAt:now});
+ const current=(await store.getCase(tenant.id,a.id))!;await store.commitCase({record:{...current,version:current.version+1},expectedVersion:current.version,events:[],jobs:[],appointment:{...appointment,active:false,updatedAt:new Date().toISOString()}});
+ expect((await store.listJobs(tenant.id)).find(j=>j.id===reminderId)!.status).toBe('done');
+
+});
+
+it('restricts SQL push ownership and removes bindings with revoked sessions',async()=>{
+ const {validateSubscription}=await import('../src/integrations/push.js');const {createECDH}=await import('node:crypto');
+ const tenant=(await store.getTenantBySlug('demo-phoenix-appliance'))!,other=(await store.getTenantBySlug('demo-harbor-warranty'))!;
+ const user=(await store.listStaffUsers(tenant.id))[0],now=new Date().toISOString(),sid=randomUUID();
+ await store.createStaffSession({id:sid,userId:user.id,tenantId:tenant.id,createdAt:now,expiresAt:new Date(Date.now()+3600000).toISOString()});
+ const e=createECDH('prime256v1'),sub={endpoint:'https://fcm.googleapis.com/wp/'+randomUUID(),keys:{p256dh:e.generateKeys().toString('base64url'),auth:Buffer.alloc(16,1).toString('base64url')}};
+ const r={...sub,id:randomUUID(),tenantId:tenant.id,userId:user.id,sessionId:sid,endpointHash:validateSubscription(sub),enabled:true,createdAt:now,updatedAt:now};expect(await store.savePushRegistration(r)).toBe(true);
+ expect((await store.listPushRegistrations(other.id))).toEqual([]);await store.disablePushRegistration(other.id,user.id,r.id);expect((await store.listPushRegistrations(tenant.id,user.id))).toHaveLength(1);
+ await store.deleteStaffSession(tenant.id,sid);expect((await store.listPushRegistrations(tenant.id,user.id))).toHaveLength(0);
 });

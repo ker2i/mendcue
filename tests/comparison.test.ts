@@ -38,5 +38,9 @@ it("runs both complete-brief systems with equivalent images, model and output bu
   expect(product.status).toBe("ok");expect(baseline.complaint).toBe("Washer stopped");expect(calls).toHaveLength(2);
   expect(calls[0].messages[1].content).toEqual(calls[1].messages[1].content);
   expect(calls.map(c=>[c.model,c.max_tokens])).toEqual([["muse-spark-1.3",2048],["muse-spark-1.3",2048]]);
+  for (const call of calls) {
+    expect(call).not.toHaveProperty("mode");
+    expect(call.reasoning_effort).toBe("minimal");
+  }
  }finally{mocked.mockRestore();vi.unstubAllEnvs();}
 });

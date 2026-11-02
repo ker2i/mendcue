@@ -1,3 +1,4 @@
+import { newBriefPushJob } from "../integrations/push.js";
 import { inferenceImage } from "../integrations/storage/images.js";
 import { webhookJob } from "./outbox.js";
 // Shared tenant-aware intake engine. Used by widget, hosted site, dashboard, API.
@@ -6,7 +7,7 @@ import type { Assessment, CaseFact, CaseRecord, Message, PendingAction, TenantCo
 import type { HazardHit } from "./safety.js";
 import { detectConflicts, isAllowedKey, isUnknownValue, normalizeFact } from "./facts.js";
 import { containsForbiddenAction, gasLeakScript, generalHazardScript, screenHazards } from "./safety.js";
-import { findAction, findQuestion, nextQuestion, questionRationale } from "./questions.js";
+import { findAction, findQuestion, isQuestionSelectable, nextQuestion, questionRationale } from "./questions.js";
 import { normalizeModel, evidenceReference, retrieveKnowledge } from "./knowledge.js";
 import { groundedIssueAreas } from "./brief.js";
 import { parseLabelText } from "./labelparse.js";
@@ -276,6 +277,15 @@ export async function processTurn(
     });
   }
 
+  // Social greetings are not appliance symptoms and need no model request.
+  if (/^(hi|hello|hey|good morning|good afternoon|good evening)[!.\s]*$/i.test(text.trim())) {
+    const reply = current.has("appliance_category")
+      ? "Hi again! I'm here to help. What else would you like the technician to know?"
+      : "Hi there! Tell me which appliance needs help and what's happening. I'll take it from there.";
+    await persistAssistant(store, tenant.id, c, reply);
+    return { reply, phase: c.conversationPhase, safetyStatus: c.safetyStatus, factsAdded: [], conflicts: [], questionId: null, actionId: null, modelMode: c.modelMode };
+  }
+
   // 1b. Resolve explicit pending decisions BEFORE normal extraction.
   // Only affirmative/negation/valid-correction answers resolve a model
   // confirmation; anything else falls through to normal conversation.
@@ -348,7 +358,8 @@ export async function processTurn(
   }
 
   // 3. Validate + conflict-detect. Never silently choose on contradiction.
-  const valid = proposed.filter((p) => isAllowedKey(p.key) && !["model_confirmed", "consent", "service_area_acknowledged"].includes(p.key));
+  const categoryOnly = /^(?:(?:a|my|the) )?(?:refrigerator|fridge|freezer|washer|washing machine|dryer|dishwasher|oven|stove|other)[.!]?$/i.test(text.trim());
+  const valid = proposed.filter((p) => !(categoryOnly && p.key === "problem_description") && isAllowedKey(p.key) && !["model_confirmed", "consent", "service_area_acknowledged"].includes(p.key));
   const conflicts = detectConflicts(facts, valid);
   const factsAdded: string[] = [];
   if (conflicts.length > 0) {
@@ -381,7 +392,7 @@ export async function processTurn(
   }
 
   // First substantive message becomes the complaint if none recorded.
-  if (!current.has("problem_description") && text.trim().length > 0) {
+  if (!current.has("problem_description") && !categoryOnly && text.trim().length > 0) {
     const nf = await addFact(store, tenant.id, c, { key: "problem_description", value: text.slice(0, 2000), certainty: "explicit" }, messageId, null);
     current.set("problem_description", nf);
     factsAdded.push("problem_description");
@@ -465,7 +476,7 @@ export async function processTurn(
   let chosen = null as ReturnType<typeof findQuestion> | null;
   if (suggestedQuestionId) {
     const q = findQuestion(suggestedQuestionId);
-    if (q && !asked.has(q.id) && !(q.factKey && factKeys.has(q.factKey)) &&
+    if (q && isQuestionSelectable(q) && !asked.has(q.id) && !(q.factKey && factKeys.has(q.factKey)) &&
         q.preconditions.every((p) => factKeys.has(p)) &&
         (!q.categories || !category || q.categories.includes(category)) &&
         !q.exclusions.some((e) => activeHazards.includes(e)) &&
@@ -937,7 +948,7 @@ export async function submitCase(
     handoff: { version, caseId: c.id, tenantId: tenant.id, createdAt: now, snapshot },
     events: [{ id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "case_submitted",
       payload: { handoffVersion: version }, createdAt: now }],
-    jobs: [webhookJob(c, "case.submitted", version), ...(tenant.notifications.emailEnabled && tenant.notifications.emailTo ? [{
+    jobs: [...await newBriefPushJob(store,tenant.id,c.id), webhookJob(c, "case.submitted", version), ...(tenant.notifications.emailEnabled && tenant.notifications.emailTo ? [{
       id: randomUUID(), tenantId: tenant.id, caseId: c.id, kind: "notification",
       payload: { to: tenant.notifications.emailTo, reference: c.reference,
         staffUrl: `${process.env.APP_BASE_URL ?? "http://localhost:3000"}/staff#case=${encodeURIComponent(c.id)}` },

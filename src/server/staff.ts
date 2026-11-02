@@ -1,3 +1,4 @@
+import { registerTechnicianRoutes } from "./technician.js";
 import { briefForReview } from "../domain/brief-review.js";
 import { reviewTimer } from "../domain/review-timer.js";
 import { webhookJob } from "../domain/outbox.js";
@@ -13,6 +14,7 @@ const COOKIE = "staff_session";
 const CSRF_COOKIE = "staff_csrf";
 
 export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
+  app.use("/api/v1/staff", (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
   app.post("/api/v1/staff/login", async (req, res) => {
     const rid = requestId();
     const schema = z.object({ tenantSlug: z.string().min(1), email: z.string().email(), password: z.string().min(1) });
@@ -37,7 +39,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     const csrf = csrfToken();
     res.cookie(COOKIE, sid, { httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", maxAge: 8 * 3600_000, path: "/" });
     res.cookie(CSRF_COOKIE, csrf, { httpOnly: false, sameSite: "lax", secure: process.env.NODE_ENV === "production", maxAge: 8 * 3600_000, path: "/" });
-    res.json({ ok: true, user: { name: user.name, role: user.role, email: user.email }, csrf, tenant: tenant.slug });
+    res.json({ ok: true, user: { id: user.id, name: user.name, role: user.role, email: user.email }, csrf, tenant: tenant.slug, tenantId: tenant.id, tenantName:tenant.name, timezone:tenant.timezone, expiresAt: new Date(Date.now() + 8 * 3600_000).toISOString() });
   });
 
   async function staffAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -45,7 +47,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     const sid = String(req.cookies?.[COOKIE] ?? "");
     if (!sid) return res.status(401).json(errorBody("UNAUTHORIZED", "Staff login required.", rid));
     const s = await deps.store.getStaffSession(sid);
-    if (!s || s.expiresAt < new Date().toISOString()) {
+    if (!s || s.expiresAt <= new Date().toISOString()) {
       return res.status(401).json(errorBody("UNAUTHORIZED", "Session expired.", rid));
     }
     if (["POST", "PATCH", "PUT", "DELETE"].includes(req.method)) {
@@ -69,6 +71,20 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
   const ctx = (req: express.Request) =>
     req as unknown as { staffTenant: { id: string; slug: string }; staffSession: { userId: string }; staffUser: { role: string } };
 
+  app.get("/api/v1/staff/me", staffAuth, async (req, res) => {
+    const { staffTenant, staffSession, staffUser } = req as unknown as { staffTenant: { id: string; slug: string; name: string;timezone:string }; staffSession: { expiresAt: string }; staffUser: { id: string; name: string; email: string; role: string } };
+    const csrf = String(req.cookies?.[CSRF_COOKIE] || csrfToken());
+    res.cookie(CSRF_COOKIE, csrf, { httpOnly: false, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/" });
+    res.json({ user: staffUser && { id: staffUser.id, name: staffUser.name, email: staffUser.email, role: staffUser.role }, tenant: { id: staffTenant.id, slug: staffTenant.slug, name: staffTenant.name, timezone:staffTenant.timezone }, expiresAt: staffSession.expiresAt, csrf });
+  });
+  app.post("/api/v1/staff/logout", staffAuth, async (req, res) => {
+    const { staffTenant, staffSession } = req as unknown as { staffTenant: { id: string }; staffSession: { id: string } };
+    for(const r of await deps.store.listPushRegistrations(staffTenant.id)){if(r.sessionId===staffSession.id)await deps.store.disablePushRegistration(staffTenant.id,r.userId,r.id);}
+    await deps.store.deleteStaffSession(staffTenant.id, staffSession.id);
+    res.clearCookie(COOKIE, { path: "/" }); res.clearCookie(CSRF_COOKIE, { path: "/" });
+    res.json({ ok: true });
+  });
+
   // Server-enforced permission matrix: read-only staff may read but never
   // mutate cases or outcomes. Technician, dispatcher, and owner may mutate.
   function requireMutate(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -79,8 +95,16 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
     next();
   }
 
+  registerTechnicianRoutes(app,deps,staffAuth,requireMutate);
+
   app.get("/api/v1/staff/cases", staffAuth, async (req, res) => {
     const { staffTenant } = ctx(req);
+    if(req.query.view!==undefined){
+      const parsed=z.object({view:z.enum(['new','active','all','draft','reviewing','contacted','scheduled','closed','cancelled']),search:z.string().max(120).default(''),offset:z.coerce.number().int().min(0).max(10000).default(0),limit:z.coerce.number().int().min(1).max(50).default(30)}).safeParse(req.query);
+      if(!parsed.success)return res.status(400).json(errorBody('VALIDATION_ERROR','Invalid inbox filter.',requestId()));
+      const rows=await deps.store.listInbox(staffTenant.id,{...parsed.data,limit:parsed.data.limit+1});
+      return res.json({cases:rows.slice(0,parsed.data.limit),hasMore:rows.length>parsed.data.limit});
+    }
     const cases = await deps.store.listCases(staffTenant.id);
     const rows = [];
     for (const c of cases) {
@@ -113,7 +137,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
       deps.store.getAssessment(staffTenant.id, c.id),
       deps.store.getOutcome(staffTenant.id, c.id),
     ]);
-    res.json({ briefForReview: handoffs.length ? briefForReview(handoffs[handoffs.length-1].snapshot) : null, case: c, facts, messages, attachments, handoffs, events, assessment, outcome, reviewTimer: reviewTimer(events, ctx(req).staffSession.userId) });
+    res.json({ appointment:(await deps.store.listAppointments(staffTenant.id)).find(a=>a.caseId===c.id)??null, briefForReview: handoffs.length ? briefForReview(handoffs[handoffs.length-1].snapshot) : null, case: c, facts, messages, attachments, handoffs, events, assessment, outcome, reviewTimer: reviewTimer(events, ctx(req).staffSession.userId) });
   });
 
   app.patch("/api/v1/staff/cases/:caseId", staffAuth, requireMutate, async (req, res) => {
@@ -254,7 +278,7 @@ export function registerStaffRoutes(app: express.Express, deps: AppDeps): void {
       payload: { attachmentId: att.id }, createdAt: new Date().toISOString(),
     });
     res.setHeader("content-type", att.mimeType);
-    res.setHeader("cache-control", "private, max-age=60");
+    res.setHeader("cache-control", "no-store");
     res.send(Buffer.from(buf));
   });
 

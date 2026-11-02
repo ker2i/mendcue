@@ -43,3 +43,10 @@ Submission description draft:
 Replace the final sentence only with measured results from an actual capped live
 run and technician evaluation. Check the participant portal before recording length
 or submitting materials; no publishing action has been performed here.
+
+The technician companion now supports an Android home-screen installation, real
+internal appointments, day/week scheduling, internal notes and opt-in device push.
+Show a synthetic brief becoming an appointment, then its calendar row and a saved
+job note. Keep actual physical Android installation/notification results separate
+from browser and fake-sender checks. Booking here does not message the customer or
+create an external calendar booking. See [technician-app.md](technician-app.md).

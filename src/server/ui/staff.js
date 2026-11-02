@@ -15,9 +15,19 @@
   function csrf() { return { "content-type": "application/json", "x-csrf-token": cookie("staff_csrf") }; }
 
   var S = { user: null, tenant: null, cases: [], openId: null, detail: null, tab: "inbox" };
+  function expireSession() {
+    if(window.MendcueMobile)window.MendcueMobile.expired();
+    S.user=null;S.cases=[];S.openId=null;S.detail=null;
+    clear(document.getElementById("detail"));clear(document.getElementById("inbox"));clear(document.getElementById("settings"));
+    appBox.style.display="none";document.getElementById("sessionLoading").style.display="none";loginBox.style.display="block";
+  }
+  function staffFetch(path,options){var userId=S.user&&S.user.id;return window.fetch(path,Object.assign({cache:"no-store",signal:AbortSignal.timeout(15000)},options)).then(function(r){
+    if(userId&&(!S.user||userId!==S.user.id))throw Error("Account changed.");
+    if(r.status===401&&!path.endsWith("/login")&&!path.endsWith("/me")){expireSession();throw Error("Sign in again to continue.");}return r;
+  });}
   function changeReviewTimer(detail, action) {
     if (detail.timerRequest) return detail.timerRequest;
-    detail.timerRequest = fetch("/api/v1/staff/cases/" + detail.case.id + "/review-timer", {
+    detail.timerRequest = staffFetch("/api/v1/staff/cases/" + detail.case.id + "/review-timer", {
       method: "POST", keepalive: true, headers: csrf(), body: JSON.stringify({version: detail.case.version, action: action})
     }).then(function(r) {
       if (!r.ok) throw Error("Timer could not be updated. Refresh this case before recording measured effort.");
@@ -45,23 +55,40 @@
   var loginBox = document.getElementById("login");
   var appBox = document.getElementById("app");
 
+  async function enter(user, tenant, identity) {
+    S.user = user; S.tenant = tenant;
+    document.getElementById("sessionLoading").style.display = "none";
+    loginBox.style.display = "none"; appBox.style.display = "block";
+    document.getElementById("who").textContent = user.name + " (" + user.role + ") — " + tenant;
+    await window.MendcueMobile.enter(identity);
+    if(!S.user)return;
+    loadInbox();
+    if (location.hash.startsWith("#case=")) openCase(decodeURIComponent(location.hash.slice(6)));
+  }
+  function restore() {
+    staffFetch("/api/v1/staff/me", {cache: "no-store"}).then(function(r) {
+      if (r.status === 401) { document.getElementById("sessionLoading").style.display = "none"; loginBox.style.display = "block"; return null; }
+      if (!r.ok) throw Error();
+      return r.json();
+    }).then(function(j) { if (j) enter(j.user, j.tenant.name, Object.assign({},j.tenant,{userId:j.user.id})); }).catch(function() {
+      var box = document.getElementById("sessionLoading"); clear(box);
+      box.appendChild(el("span", "Connection unavailable. "));
+      var retry = el("button", "Retry", "btn"); retry.onclick = restore; box.appendChild(retry);
+    });
+  }
   function login() {
     var slug = document.getElementById("slug").value.trim();
     var email = document.getElementById("email").value.trim();
     var pw = document.getElementById("pw").value;
-    fetch("/api/v1/staff/login", {
+    staffFetch("/api/v1/staff/login", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ tenantSlug: slug, email: email, password: pw }),
     }).then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
       .then(function (o) {
         if (!o.r.ok) { alert((o.j.error && o.j.error.message) || "Login failed."); return; }
-        S.user = o.j.user; S.tenant = o.j.tenant;
-        loginBox.style.display = "none";
-        appBox.style.display = "block";
-        document.getElementById("who").textContent = o.j.user.name + " (" + o.j.user.role + ") — " + o.j.tenant;
-        loadInbox();
-        if (location.hash.startsWith("#case=")) openCase(decodeURIComponent(location.hash.slice(6)));
-      });
+        document.getElementById("pw").value = "";
+        enter(o.j.user, o.j.tenantName||o.j.tenant, {id:o.j.tenantId,slug:o.j.tenant,userId:o.j.user.id,timezone:o.j.timezone});
+      }).catch(function(){alert("Could not sign in. Check your connection and try again.");});
   }
 
   function counters(cases) {
@@ -75,13 +102,14 @@
     });
   }
 
-  function loadInbox() {
-    fetch("/api/v1/staff/cases").then(function (r) { return r.json(); }).then(function (j) {
-      S.cases = j.cases || [];
-      counters(S.cases);
-      renderInbox();
-      if (S.tab === "settings") loadSettings();
-    });
+  var inboxGeneration=0;
+  function loadInbox(append) {
+    append=append===true;var generation=++inboxGeneration;
+    var params=new URLSearchParams({view:document.getElementById("statusFilter").value,search:document.getElementById("search").value.slice(0,120),offset:String(append?S.cases.length:0),limit:"30"});
+    return staffFetch("/api/v1/staff/cases?"+params).then(function(r){if(!r.ok)throw Error();return r.json();}).then(function(j){
+      if(generation!==inboxGeneration)return;S.cases=append?S.cases.concat(j.cases||[]):j.cases||[];S.hasMore=!!j.hasMore;
+      counters(S.cases);renderInbox();
+    }).catch(function(){if(S.user)document.getElementById("appNotice").textContent="Could not refresh the inbox. Your open edits have been kept.";});
   }
 
   function renderInbox() {
@@ -90,7 +118,8 @@
     var q = (document.getElementById("search").value || "").toLowerCase();
     var statusF = document.getElementById("statusFilter").value;
     var list = S.cases.filter(function (c) {
-      if (statusF !== "all" && c.workflowStatus !== statusF) return false;
+      if(statusF==="active"&&!["new","reviewing","contacted","scheduled"].includes(c.workflowStatus))return false;
+      if(statusF!=="active"&&statusF!=="all"&&c.workflowStatus!==statusF)return false;
       if (!q) return true;
       return ((c.reference || "") + " " + (c.appliance || "") + " " + (c.complaint || "") + " " + (c.zip || "")).toLowerCase().includes(q);
     });
@@ -108,6 +137,7 @@
       b.onclick = function () { openCase(c.id); };
       box.appendChild(b);
     });
+    if(S.hasMore){var more=el("button","Load more","btn");more.id="loadMore";more.onclick=function(){loadInbox(true);};box.appendChild(more);}
   }
 
   function readable(value) { return String(value || "Unknown").replace(/_/g, " "); }
@@ -116,12 +146,14 @@
   function openCase(id) {
     var paused = S.openId && S.openId !== id ? pauseActiveReview() : Promise.resolve();
     S.openId = id;
-    history.replaceState(null, "", "#case=" + encodeURIComponent(id));
-    return paused.then(function() { return fetch("/api/v1/staff/cases/" + id); }).then(function (r) { return r.json(); }).then(function (j) {
+    if (location.hash !== "#case=" + encodeURIComponent(id)) history.pushState(null, "", "#case=" + encodeURIComponent(id));
+    document.getElementById("inboxPane").classList.add("case-open");
+    return paused.then(function() { return staffFetch("/api/v1/staff/cases/" + id); }).then(function (r) { return r.json(); }).then(function (j) {
       if (S.openId !== id) return;
+      if (!j.case) { document.getElementById("detail").textContent = "This brief is unavailable."; return; }
       S.detail = j;
       renderDetail(j);
-    });
+    }).catch(function(){if(S.user)document.getElementById("detail").textContent="Could not load this request. Check your connection and try again.";});
   }
 
   function renderDetail(j) {
@@ -206,11 +238,11 @@
         b.onclick = function() {
           b.disabled = true;
           function lines(value) { return value.split("\n").map(function(s) { return s.trim(); }).filter(Boolean); }
-          fetch("/api/v1/staff/cases/" + c.id + "/review", { method: "POST", headers: csrf(), body: JSON.stringify({
+          staffFetch("/api/v1/staff/cases/" + c.id + "/review", { method: "POST", headers: csrf(), body: JSON.stringify({
             version: c.version, disposition: pair[0], revisedBrief: revised.value || undefined,
             missingFacts: lines(missing.value), unsupportedAssertions: lines(unsupported.value),
             reviewSeconds: seconds.value === "" ? null : Number(seconds.value), timingMethod: measured.checked ? "measured" : seconds.value === "" ? "not_recorded" : "manual", note: note.value
-          }) }).then(function(r) { if (!r.ok) throw new Error("Save failed; refresh and retry."); openCase(c.id); }).catch(function(e) { status.textContent = e.message; b.disabled = false; });
+          }) }).then(function(r) { if (!r.ok) throw new Error("Save failed; your edits are kept. Refresh and review before retrying."); return window.MendcueMobile.savedFields(c.id,panel).then(function(){return openCase(c.id);}); }).catch(function(e) { status.textContent = e.message; b.disabled = false; });
         }; panel.appendChild(b);
       }); panel.appendChild(status); d.appendChild(panel);
     }
@@ -258,7 +290,7 @@
     verify.disabled = !canEdit;
     verify.onclick = function() {
       verify.disabled = true;
-      fetch("/api/v1/staff/cases/" + c.id + "/identity-verification", {
+      staffFetch("/api/v1/staff/cases/" + c.id + "/identity-verification", {
         method: "POST", headers: csrf(), body: JSON.stringify({version: c.version, brand: brand.value.trim(),
           model: model.value.trim(), serial: serial.value.trim() || null, provenance: basis.value, note: basisNote.value.trim()})
       }).then(function(r) {
@@ -267,7 +299,7 @@
       }).then(function(x) {
         c.version = x.version; heading.textContent = c.reference + " (v" + c.version + ")";
         verifiedStatus.textContent = "Technician verified: " + x.verification.payload.brand + " " + x.verification.payload.model + " · " + x.verification.createdAt;
-        verificationStatus.textContent = "Verification saved.";
+        verificationStatus.textContent = "Verification saved."; window.MendcueMobile.savedFields(c.id,effort);
       }).catch(function(e) { verificationStatus.textContent = e.message; }).finally(function() { verify.disabled = !canEdit; });
     };
     effort.appendChild(verify);
@@ -340,7 +372,7 @@
     oc.appendChild(issue);
     var sb = el("button", "Save outcome", "btn");
     sb.onclick = function () {
-      fetch("/api/v1/staff/cases/" + c.id + "/outcome", {
+      staffFetch("/api/v1/staff/cases/" + c.id + "/outcome", {
         method: "POST", headers: csrf(),
         body: JSON.stringify({ rating: document.getElementById("rating").value, confirmedIssue: document.getElementById("issue").value }),
       }).then(function (r) { return r.json().then(function (x) { return { r: r, x: x }; }); })
@@ -360,7 +392,7 @@
       st.appendChild(el("label", parts[0]));
       var s2 = document.createElement("select"); s2.id = "f_" + parts[0];
       parts[1].split(",").forEach(function (o) { var op = document.createElement("option"); op.textContent = o; s2.appendChild(op); });
-      st.appendChild(s2);
+      s2.value=c[parts[0]]; st.appendChild(s2);
     });
     st.appendChild(el("label", "Assignee / note"));
     var note = document.createElement("input");
@@ -368,7 +400,7 @@
     st.appendChild(note);
     var ub = el("button", "Update case", "btn");
     ub.onclick = function () {
-      fetch("/api/v1/staff/cases/" + c.id, {
+      staffFetch("/api/v1/staff/cases/" + c.id, {
         method: "PATCH", headers: csrf(),
         body: JSON.stringify({
           workflowStatus: document.getElementById("f_workflowStatus").value,
@@ -378,7 +410,7 @@
       }).then(function (r) { return r.json(); }).then(function (x) {
         alert(x.ok ? "Updated." : ((x.error && x.error.message) || "Update failed."));
         loadInbox();
-        if (location.hash.startsWith("#case=")) openCase(decodeURIComponent(location.hash.slice(6))); openCase(c.id);
+        openCase(c.id);
       });
     };
     st.appendChild(ub);
@@ -402,10 +434,11 @@
     var pre = el("pre", h ? JSON.stringify(h.snapshot, null, 2) : "(not submitted yet)", "dump");
     full.appendChild(pre);
     d.appendChild(full);
+    window.MendcueMobile.detail(j,d);
   }
 
   function loadSettings() {
-    fetch("/api/v1/staff/settings").then(function (r) { return r.json(); }).then(function (s) {
+    staffFetch("/api/v1/staff/settings").then(function (r) { return r.json(); }).then(function (s) {
       var box = document.getElementById("settings");
       clear(box);
       var t = s.tenant || {};
@@ -437,10 +470,10 @@
       var creds = s.serviceCredentials || [];
       box.appendChild(el("p", creds.length ? creds.map(function (c) { return c.name + " [" + c.scopes.join(", ") + "]"; }).join("; ") : "None.", "muted"));
       box.appendChild(el("h3", "Background delivery and processing"));
-      fetch("/api/v1/staff/jobs").then(function(r){return r.json();}).then(function(data){
+      staffFetch("/api/v1/staff/jobs").then(function(r){return r.json();}).then(function(data){
         (data.jobs||[]).slice(0,30).forEach(function(job){
           var row=el("p",job.kind+" · "+job.status+" · attempt "+job.attempts+"/"+job.maxAttempts+(job.availableAt?" · due "+job.availableAt:""));
-          if(job.status==="failed"&&(job.operatorRetries||0)<3){var retry=el("button","Retry","btn secondary");retry.onclick=function(){fetch("/api/v1/staff/jobs/"+job.id+"/retry",{method:"POST",headers:csrf(),body:"{}"}).then(function(r){if(!r.ok)alert("Retry denied or limit reached.");loadSettings();});};row.appendChild(retry);}box.appendChild(row);
+          if(job.status==="failed"&&(job.operatorRetries||0)<3){var retry=el("button","Retry","btn secondary");retry.onclick=function(){staffFetch("/api/v1/staff/jobs/"+job.id+"/retry",{method:"POST",headers:csrf(),body:"{}"}).then(function(r){if(!r.ok)alert("Retry denied or limit reached.");loadSettings();});};row.appendChild(retry);}box.appendChild(row);
         });
       });
       box.appendChild(el("h3", "Webhooks"));
@@ -469,17 +502,38 @@
     });
   }
 
+  function backToInbox() {
+    pauseActiveReview(); S.openId = null; S.detail = null;
+    document.getElementById("inboxPane").classList.remove("case-open");
+    clear(document.getElementById("detail"));
+  }
+  document.getElementById("backInbox").onclick = function() { history.pushState(null, "", location.pathname + location.search); backToInbox(); };
+  window.addEventListener("popstate", function() { if (location.hash.startsWith("#case=")) openCase(decodeURIComponent(location.hash.slice(6))); else backToInbox(); });
+  document.getElementById("logout").onclick = function() {
+    staffFetch("/api/v1/staff/logout", {method:"POST", headers:csrf(), body:"{}"}).then(function(r) {
+      if (!r.ok && r.status !== 401) throw Error();
+      return window.MendcueMobile.logout().then(function(){S.user = null; S.cases = []; backToInbox(); clear(document.getElementById("inbox")); clear(document.getElementById("settings"));
+      appBox.style.display = "none"; loginBox.style.display = "block";});
+    }).catch(function(){ alert("Could not log out. Check your connection and try again."); });
+  };
+  window.MendcueMobile.init({state:S,openCase:openCase,loadInbox:loadInbox,pause:pauseActiveReview,expire:expireSession});
+  restore();
+  function refreshForeground(){if(!S.user)return;staffFetch("/api/v1/staff/me").then(function(r){if(r.status===401)expireSession();else if(r.ok)loadInbox();}).catch(function(){});}
+  document.addEventListener("visibilitychange",function(){if(document.visibilityState==="visible")refreshForeground();});window.addEventListener("online",refreshForeground);
   document.getElementById("go").onclick = login;
-  document.getElementById("refresh").onclick = loadInbox;
-  document.getElementById("search").addEventListener("input", renderInbox);
-  document.getElementById("statusFilter").addEventListener("change", renderInbox);
+  document.getElementById("refresh").onclick = function(){if(S.tab==="calendar")window.MendcueMobile.refreshCalendar();else loadInbox();};
+  var searchTimer;document.getElementById("search").addEventListener("input", function(){clearTimeout(searchTimer);searchTimer=setTimeout(loadInbox,200);});
+  document.getElementById("statusFilter").addEventListener("change", function(){loadInbox();});
   document.getElementById("tabInbox").onclick = function () {
+    window.MendcueMobile.hideDeviceSettings();
     S.tab = "inbox";
     document.getElementById("inboxPane").style.display = "";
     document.getElementById("settings").style.display = "none";
   };
   document.getElementById("tabSettings").onclick = function () {
     pauseActiveReview();
+    window.MendcueMobile.hideDeviceSettings();
+    document.getElementById("deviceSettings").style.display="block";window.MendcueMobile.settings();
     S.tab = "settings";
     document.getElementById("inboxPane").style.display = "none";
     document.getElementById("settings").style.display = "block";

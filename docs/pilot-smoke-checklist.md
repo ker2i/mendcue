@@ -30,3 +30,14 @@ knowledge only. Restarting this memory process resets its cases; use a dedicated
 media directory and remove it only after stopping the isolated demo. Never reset a
 pilot database to prepare a demo. The separate static `demo-site/` remains scripted
 and requires its own browser check; it is not the running intake application.
+
+## Technician Android device
+
+Open `/staff/?business=quickfix-phoenix` in Android Chrome. Install to the home screen,
+sign in, open a synthetic request and book/reschedule/cancel a visit. Check the
+business timezone, day/week calendar and overlap warning. Type an unsent job note,
+relaunch and verify recovery, then save once. Enable notifications deliberately;
+with the app closed and phone locked, submit a synthetic request and observe/tap
+its generic notification. Check a reminder, permission denial, eight-hour expiry,
+logout and weak connectivity. Record actual OS/browser and device results. A browser
+or fake sender pass does not establish physical installation or push delivery.

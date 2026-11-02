@@ -1,3 +1,5 @@
+import { overlaps, AppointmentOverlap, type Appointment } from "../domain/appointments.js";
+import type { PushRegistration } from "./store.js";
 import { randomUUID } from "node:crypto";
 // In-memory store for tests and local dev without Postgres.
 // Every read enforces tenantId; cross-tenant access returns null/[].
@@ -6,6 +8,32 @@ import type { KnowledgeChunk, KnowledgeDocument } from "../domain/knowledge.js";
 import type { CaseCommit, JobRecord, OutcomeRecord, ServiceCredential, SessionRecord, StaffSession, StaffUser, Store, WebhookDelivery, WebhookEndpoint } from "./store.js";
 
 export class MemoryStore implements Store {
+  appointments = new Map<string,Appointment>();
+  pushRegistrations = new Map<string,PushRegistration>();
+  async findMutationReceipt(tenantId:string,userId:string,mutationId:string){return structuredClone(this.events.find(e=>e.tenantId===tenantId&&e.type==='staff_mutation_receipt'&&e.payload.recordedBy===userId&&e.payload.clientMutationId===mutationId)??null);}
+  async listInbox(tenantId:string,q:import('./store.js').InboxQuery){
+    const result:import('./store.js').InboxRow[]=[];
+    for(const c of this.cases.values()){
+      if(c.tenantId!==tenantId)continue;
+      if(q.view==='active'&&!['new','reviewing','contacted','scheduled'].includes(c.workflowStatus))continue;
+      if(!['all','active'].includes(q.view)&&c.workflowStatus!==q.view)continue;
+      const facts=this.facts.filter(f=>f.tenantId===tenantId&&f.caseId===c.id&&f.status!=='superseded');const m=new Map(facts.map(f=>[f.key,f.value]));
+      const row={...c,appliance:m.get('appliance_category')??null,complaint:m.get('problem_description')??null,zip:m.get('service_zip')??null,brand:m.get('brand')??null,model:m.get('model_number')??null};
+      if(q.search&&![row.reference,row.appliance,row.complaint,row.zip,row.brand,row.model].join(' ').toLowerCase().includes(q.search.toLowerCase()))continue;result.push(row);
+    }
+    return structuredClone(result.sort((a,b)=>String(b.submittedAt??'').localeCompare(String(a.submittedAt??''))||b.id.localeCompare(a.id)).slice(q.offset,q.offset+q.limit));
+  }
+  async listStaffUsers(tenantId:string){return structuredClone([...this.staff.values()].filter(u=>u.tenantId===tenantId));}
+  async listAppointments(tenantId:string){return structuredClone([...this.appointments.values()].filter(a=>a.tenantId===tenantId));}
+  async listPushRegistrations(tenantId:string,userId?:string){return structuredClone([...this.pushRegistrations.values()].filter(a=>a.tenantId===tenantId&&(!userId||a.userId===userId)&&a.enabled));}
+  async savePushRegistration(r:PushRegistration){
+    const all=[...this.pushRegistrations.values()];
+    if(all.some(a=>a.enabled&&a.endpointHash===r.endpointHash&&a.id!==r.id))return false;
+    if(all.filter(a=>a.enabled&&a.tenantId===r.tenantId&&a.userId===r.userId&&a.id!==r.id).length>=5)return false;
+    this.pushRegistrations.set(r.id,structuredClone(r));return true;
+  }
+  async disablePushRegistration(tenantId:string,userId:string,id:string){const r=this.pushRegistrations.get(id);if(r&&r.tenantId===tenantId&&r.userId===userId)r.enabled=false;}
+
   tenants = new Map<string, TenantConfig>();
   cases = new Map<string, CaseRecord>();
   messages: Message[] = [];
@@ -36,6 +64,13 @@ export class MemoryStore implements Store {
       if (row.tenantId !== c.tenantId || row.caseId !== c.id) throw new Error("case commit scope mismatch");
     }
     if (handoff && this.handoffs.some(h => h.caseId === c.id && h.version === handoff.version)) throw new Error("duplicate handoff");
+    if(change.appointment){
+      if(change.appointment.tenantId!==c.tenantId||change.appointment.caseId!==c.id)throw Error("appointment scope mismatch");
+      if([...this.appointments.values()].some(a=>overlaps(a,change.appointment!)))throw new AppointmentOverlap();
+    }
+    const receipt=events.find(e=>e.type==="staff_mutation_receipt");
+    if(receipt&&this.events.some(e=>e.type===receipt.type&&e.tenantId===c.tenantId&&e.payload.recordedBy===receipt.payload.recordedBy&&e.payload.clientMutationId===receipt.payload.clientMutationId))return false;
+    if(change.appointment){this.appointments.set(c.id,change.appointment);for(const j of this.jobs)if(j.tenantId===c.tenantId&&j.caseId===c.id&&j.kind==='staff_reminder'&&['pending','failed'].includes(j.status)){j.status='done';j.updatedAt=c.updatedAt;}}
     this.cases.set(c.id, c);
     this.events.push(...events);
     this.jobs.push(...jobs);
@@ -66,7 +101,7 @@ export class MemoryStore implements Store {
       if(!expired || this.jobs.some(j=>j.caseId===c.id && ["pending","leased"].includes(j.status)))continue;
       const keys=this.attachments.filter(a=>a.caseId===c.id&&a.tenantId===tenant.id).map(a=>a.storageKey);
       this.jobs.push({id:randomUUID(),tenantId:tenant.id,caseId:null,kind:"storage_delete",payload:{keys},status:"pending",attempts:0,maxAttempts:8,leaseUntil:null,lastError:null,createdAt:now,updatedAt:now});
-      this.cases.delete(c.id);this.assessments.delete(`${tenant.id}:${c.id}`);this.outcomes.delete(`${tenant.id}:${c.id}`);
+      this.appointments.delete(c.id);this.cases.delete(c.id);this.assessments.delete(`${tenant.id}:${c.id}`);this.outcomes.delete(`${tenant.id}:${c.id}`);
       for(const name of ["messages","facts","attachments","handoffs","events","jobs"] as const) {
         // All entries for this globally unique case are relational dependants.
         (this[name] as Array<{caseId:string|null}>) = this[name].filter(row=>row.caseId!==c.id);
@@ -76,6 +111,7 @@ export class MemoryStore implements Store {
     }
     for(const [id,s]of this.sessions)if(s.tenantId===tenant.id&&s.expiresAt<=now)this.sessions.delete(id);
     for(const [id,s]of this.staffSessions)if(s.tenantId===tenant.id&&s.expiresAt<=now)this.staffSessions.delete(id);
+    for(const [id,r] of this.pushRegistrations)if(r.tenantId===tenant.id&&(!this.staffSessions.has(r.sessionId)||!r.enabled&&Date.parse(r.updatedAt)<Date.parse(now)-86400000))this.pushRegistrations.delete(id);
     return count;
   }
 
@@ -228,6 +264,7 @@ export class MemoryStore implements Store {
     return structuredClone(u);
   }
   async createStaffSession(s: StaffSession) { this.staffSessions.set(s.id, structuredClone(s)); }
+  async deleteStaffSession(tenantId: string, id: string) { if (this.staffSessions.get(id)?.tenantId === tenantId) this.staffSessions.delete(id); }
   async getStaffSession(id: string) { return structuredClone(this.staffSessions.get(id) ?? null); }
   async saveServiceCredential(c: ServiceCredential) { this.svcCreds.set(c.id, structuredClone(c)); }
   async getServiceCredentialByHash(hash: string) {

@@ -4,6 +4,29 @@ import request from "supertest";
 import { say, startSession, testApp } from "./helpers.js";
 
 describe("text intake to handoff", () => {
+  it("asks what went wrong after an appliance-only quick reply", async () => {
+    const { app, store } = await testApp();
+    const session = await startSession(app, "pk_demo_phoenix_001");
+    const result = await say(app, session.caseId, session.token, "Washer");
+    expect(result.body.reply).toMatch(/describe the problem/i);
+    const facts = await store.listFacts("tnt_demo_phoenix", session.caseId);
+    expect(facts.some(f => f.key === "appliance_category")).toBe(true);
+    expect(facts.some(f => f.key === "problem_description")).toBe(false);
+  });
+
+  it("greets the customer without storing a greeting as the appliance problem", async () => {
+    const { app, store } = await testApp();
+    const session = await startSession(app, "pk_demo_phoenix_001");
+    const hello = await say(app, session.caseId, session.token, "Hello!");
+    expect(hello.status).toBe(201);
+    expect(hello.body.reply).toMatch(/hi there/i);
+    expect(hello.body.factsAdded).toEqual([]);
+    expect(await store.listFacts("tnt_demo_phoenix", session.caseId)).toHaveLength(0);
+    await say(app, session.caseId, session.token, "My LG washer won't drain.");
+    const facts = await store.listFacts("tnt_demo_phoenix", session.caseId);
+    expect(facts.find(f => f.key === "problem_description")?.value).not.toBe("Hello!");
+  });
+
   it("completes one intake and persists an immutable handoff", async () => {
     const { app, store } = await testApp();
     const s = await startSession(app, "pk_demo_phoenix_001");

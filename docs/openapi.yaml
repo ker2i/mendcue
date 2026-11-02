@@ -259,8 +259,118 @@ paths:
                 hypothesesUseful: { type: boolean }
       responses:
         '200': { description: Saved }
+  /staff/me:
+    get:
+      summary: Restore the current staff session (eight-hour absolute lifetime)
+      security: [{staffCookie: []}]
+      responses:
+        '200': {description: Stable user identity, tenant identity/timezone, expiry and CSRF token}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /staff/logout:
+    post:
+      summary: Revoke this staff session and its notification bindings (CSRF required)
+      security: [{staffCookie: []}]
+      responses:
+        '200': {description: Session revoked and cookies cleared}
+  /staff/team:
+    get:
+      summary: Assignable technician IDs and names within this business
+      security: [{staffCookie: []}]
+      responses:
+        '200': {description: Assignable users, current user ID and business timezone}
+  /staff/calendar:
+    get:
+      summary: Active appointments overlapping a range of at most 32 days
+      security: [{staffCookie: []}]
+      parameters:
+        - {in: query, name: from, required: true, schema: {type: string, format: date-time}}
+        - {in: query, name: to, required: true, schema: {type: string, format: date-time}}
+      responses:
+        '200': {description: Tenant appointments with brief summaries and timezone}
+        '400': {description: Invalid range}
+  /staff/cases/{caseId}/action:
+    post:
+      summary: Save an appointment, cancel a visit, append a note or change job status
+      description: |
+        CSRF and mutating staff role required. Stable clientMutationId receipts commit
+        with the case/event/outbox. Retry identical input with the same ID. Reuse with
+        different input or stale case versions returns 409. Appointment times use the
+        server-selected business timezone; startsLocal/endsLocal are YYYY-MM-DDTHH:mm.
+        Booking sets scheduled; closing/cancelling frees an active appointment.
+      security: [{staffCookie: []}]
+      parameters: [{$ref: '#/components/parameters/CaseId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, version, clientMutationId]
+              properties:
+                kind: {type: string, enum: [appointment, unschedule, note, workflow]}
+                version: {type: integer, minimum: 1}
+                clientMutationId: {type: string, format: uuid}
+                startsLocal: {type: string, example: '2026-12-01T09:00'}
+                endsLocal: {type: string, example: '2026-12-01T10:00'}
+                technicianId: {type: string, format: uuid}
+                note: {type: string, maxLength: 2000}
+                reminderMinutes: {type: integer, nullable: true, enum: [15, 30, 60, null]}
+                status: {type: string, enum: [new, reviewing, contacted, scheduled, closed, cancelled]}
+      responses:
+        '200': {description: Committed or replayed result with case version and appointment}
+        '400': {description: Invalid appointment or note}
+        '403': {description: Missing CSRF or read-only staff}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: Overlap, stale version, closed/unsubmitted request or mutation ID conflict}
+  /staff/cases/{caseId}/mutations/{mutationId}:
+    get:
+      summary: Reconcile an action receipt owned by this staff user and case
+      security: [{staffCookie: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CaseId'}
+        - {in: path, name: mutationId, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Original saved result}
+        '404': {description: No visible receipt; does not establish in-flight request failure}
+  /staff/push/config:
+    get:
+      summary: Push availability and public VAPID key
+      security: [{staffCookie: []}]
+      responses:
+        '200': {description: Enabled flag and public key; no private secrets}
+  /staff/push/subscriptions:
+    get:
+      summary: Current user's device metadata; no endpoint URLs or encryption material
+      security: [{staffCookie: []}]
+      responses:
+        '200': {description: Opaque IDs, creation times and current-session flags}
+    post:
+      summary: Enroll this browser subscription for the current session (CSRF required)
+      security: [{staffCookie: []}]
+      responses:
+        '201': {description: Opaque registration ID}
+        '400': {description: Invalid subscription or unsupported provider}
+        '409': {description: Device ownership conflict or five-device limit}
+        '503': {description: Push not configured}
+  /staff/push/subscriptions/{id}:
+    delete:
+      summary: Disable an owned device registration (CSRF required)
+      security: [{staffCookie: []}]
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Owned registration disabled}
+  /staff/push/test:
+    post:
+      summary: Queue a generic notification for this session (CSRF required; three per hour)
+      security: [{staffCookie: []}]
+      responses:
+        '202': {description: Queued; does not prove device display}
+        '409': {description: No eligible device binding}
+        '429': {description: Test limit reached}
 components:
   securitySchemes:
+    staffCookie: {type: apiKey, in: cookie, name: staff_session}
     caseToken: { type: http, scheme: bearer, description: Short-lived case capability token }
     serviceKey: { type: http, scheme: bearer, description: Scoped service key (server-side only) }
   parameters:

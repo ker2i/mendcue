@@ -1,3 +1,5 @@
+import { AppointmentOverlap, type Appointment } from "../domain/appointments.js";
+import type { PushRegistration } from "./store.js";
 import { randomUUID } from "node:crypto";
 // Postgres store. Sets app.tenant_id per transaction for RLS defense-in-depth;
 // application code still scopes every query by tenant_id explicitly.
@@ -41,15 +43,44 @@ export class PgStore implements Store {
     return this.pool.query(text, params as never[]);
   }
 
+  async findMutationReceipt(tenantId:string,userId:string,mutationId:string){return this.tenant(tenantId,async q=>{const r=(await q("SELECT id,tenant_id,case_id,type,payload,created_at FROM case_events WHERE tenant_id=$1 AND type='staff_mutation_receipt' AND payload->>'recordedBy'=$2 AND payload->>'clientMutationId'=$3",[tenantId,userId,mutationId])).rows[0];return r?{id:String(r.id),tenantId:String(r.tenant_id),caseId:String(r.case_id),type:String(r.type),payload:r.payload as Record<string,unknown>,createdAt:iso(r.created_at)}:null;});}
+  async listInbox(tenantId:string,input:import('./store.js').InboxQuery){return this.tenant(tenantId,async q=>{
+    const rows=(await q(`SELECT c.*,f.data FROM cases c LEFT JOIN LATERAL
+      (SELECT jsonb_object_agg(key,value ORDER BY created_at,id) data FROM case_facts WHERE tenant_id=$1 AND case_id=c.id AND status<>'superseded' AND key IN ('appliance_category','problem_description','service_zip','brand','model_number')) f ON true
+      WHERE c.tenant_id=$1 AND ($2='all' OR ($2='active' AND c.workflow_status IN ('new','reviewing','contacted','scheduled')) OR c.workflow_status=$2)
+      AND ($3='' OR strpos(lower(c.reference||' '||COALESCE(f.data->>'appliance_category','')||' '||COALESCE(f.data->>'problem_description','')||' '||COALESCE(f.data->>'service_zip','')||' '||COALESCE(f.data->>'brand','')||' '||COALESCE(f.data->>'model_number','')),lower($3))>0)
+      ORDER BY c.submitted_at DESC NULLS LAST,c.id DESC LIMIT $4 OFFSET $5`,[tenantId,input.view,input.search,input.limit,input.offset])).rows;
+    return rows.map(r=>{const f=(r.data??{}) as Record<string,unknown>;return {id:String(r.id),reference:String(r.reference),appliance:f.appliance_category??null,complaint:f.problem_description??null,zip:f.service_zip??null,brand:f.brand??null,model:f.model_number??null,safetyStatus:String(r.safety_status),workflowStatus:String(r.workflow_status),disposition:String(r.disposition),submittedAt:r.submitted_at?iso(r.submitted_at):null,version:Number(r.version)};});
+  });}
+  async listStaffUsers(tenantId:string){return this.tenant(tenantId,async q=>(await q("SELECT id,tenant_id,email,password_hash,role,name FROM staff_users WHERE tenant_id=$1",[tenantId])).rows.map(r=>({id:String(r.id),tenantId:String(r.tenant_id),email:String(r.email),passwordHash:String(r.password_hash),role:r.role as import("./store.js").StaffUser["role"],name:String(r.name)})));}
+  async listAppointments(tenantId:string){return this.tenant(tenantId,async q=>(await q("SELECT data FROM appointments WHERE tenant_id=$1 ORDER BY starts_at",[tenantId])).rows.map(r=>r.data as Appointment));}
+  async listPushRegistrations(tenantId:string,userId?:string){return this.tenant(tenantId,async q=>(await q("SELECT data FROM staff_push_subscriptions WHERE tenant_id=$1 AND enabled AND ($2::uuid IS NULL OR user_id=$2::uuid)",[tenantId,userId??null])).rows.map(r=>r.data as PushRegistration));}
+  async savePushRegistration(r:PushRegistration){
+    try{return await this.tenant(r.tenantId,async q=>{
+      await q("SELECT id FROM tenants WHERE id=$1 FOR UPDATE",[r.tenantId]);
+      const count=await q("SELECT id FROM staff_push_subscriptions WHERE tenant_id=$1 AND user_id=$2 AND enabled AND id<>$3",[r.tenantId,r.userId,r.id]);
+      if(count.rows.length>=5)return false;
+      await q("INSERT INTO staff_push_subscriptions(id,tenant_id,user_id,session_id,endpoint_hash,enabled,data) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET session_id=EXCLUDED.session_id,enabled=EXCLUDED.enabled,data=EXCLUDED.data WHERE staff_push_subscriptions.tenant_id=EXCLUDED.tenant_id AND staff_push_subscriptions.user_id=EXCLUDED.user_id",[r.id,r.tenantId,r.userId,r.sessionId,r.endpointHash,r.enabled,JSON.stringify(r)]);return true;
+    });}catch(e){if((e as {code?:string}).code==='23505')return false;throw e;}
+  }
+  async disablePushRegistration(tenantId:string,userId:string,id:string){await this.tenant(tenantId,async q=>{await q("UPDATE staff_push_subscriptions SET enabled=false WHERE tenant_id=$1 AND user_id=$2 AND id=$3",[tenantId,userId,id]);});}
   async commitCase(change: CaseCommit) {
     const { record: c, expectedVersion, events, jobs, handoff, assessment } = change;
     for (const row of [...events, ...jobs, ...[handoff, assessment].filter(Boolean)] as Array<{tenantId: string; caseId: string | null}>) {
       if (row.tenantId !== c.tenantId || row.caseId !== c.id) throw new Error("case commit scope mismatch");
     }
     return this.tenant(c.tenantId, async q => {
+      if(change.appointment)await q("SELECT id FROM tenants WHERE id=$1 FOR UPDATE",[c.tenantId]);
       const locked = await q("SELECT version FROM cases WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [c.tenantId, c.id]);
       if (!locked.rows[0] || Number(locked.rows[0].version) !== expectedVersion) return false;
       const tx = new PgStore(this.pool, q);
+      if(change.appointment){
+        const a=change.appointment;
+        if(a.tenantId!==c.tenantId||a.caseId!==c.id)throw Error("appointment scope mismatch");
+        if(a.active){const found=await q("SELECT case_id FROM appointments WHERE tenant_id=$1 AND case_id<>$2 AND active AND technician_id=$3 AND starts_at<$4 AND ends_at>$5 LIMIT 1",[c.tenantId,c.id,a.technicianId,a.endsAt,a.startsAt]);if(found.rows.length)throw new AppointmentOverlap();}
+        await q("UPDATE background_jobs SET status='done',updated_at=now() WHERE tenant_id=$1 AND case_id=$2 AND kind='staff_reminder' AND status IN ('pending','failed')",[c.tenantId,c.id]);
+        await q("INSERT INTO appointments(tenant_id,case_id,starts_at,ends_at,technician_id,active,data) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(tenant_id,case_id) DO UPDATE SET starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at,technician_id=EXCLUDED.technician_id,active=EXCLUDED.active,data=EXCLUDED.data",[c.tenantId,c.id,a.startsAt,a.endsAt,a.technicianId,a.active,JSON.stringify(a)]);
+      }
       await tx.updateCase(c);
       if (assessment) await tx.saveAssessment(assessment);
       if (handoff) await tx.saveHandoff(handoff);
@@ -72,6 +103,7 @@ export class PgStore implements Store {
     return this.tenant(tenant.id, async q => {
       await q("DELETE FROM customer_sessions WHERE tenant_id=$1 AND expires_at<=$2",[tenant.id,now]);
       await q("DELETE FROM staff_sessions WHERE tenant_id=$1 AND expires_at<=$2",[tenant.id,now]);
+      await q("DELETE FROM staff_push_subscriptions WHERE tenant_id=$1 AND NOT enabled AND (data->>'updatedAt')::timestamptz<$2::timestamptz-interval '1 day'",[tenant.id,now]);
       await q("DELETE FROM idempotency WHERE tenant_id=$1 AND created_at<$2::timestamptz-($3*interval '1 day')",[tenant.id,now,tenant.retention.closedDays]);
       const due=await q(`SELECT id FROM cases c WHERE tenant_id=$1 AND (
         (workflow_status='draft' AND submitted_at IS NULL AND updated_at<$2::timestamptz-($3*interval '1 day')) OR
@@ -385,6 +417,9 @@ export class PgStore implements Store {
     await this.tenant(s.tenantId, async (q) => {
       await q("INSERT INTO staff_sessions(id, user_id, tenant_id, expires_at) VALUES($1,$2,$3,$4)", [s.id, s.userId, s.tenantId, s.expiresAt]);
     });
+  }
+  async deleteStaffSession(tenantId: string, id: string) {
+    await this.tenant(tenantId, async (q) => { await q("DELETE FROM staff_sessions WHERE tenant_id=$1 AND id=$2", [tenantId, id]); });
   }
   async getStaffSession(id: string) {
     const r = await this.query("SELECT * FROM auth_staff_session($1)", [id]);

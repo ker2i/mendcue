@@ -4,6 +4,19 @@ import request from "supertest";
 import { say, startSession, testApp } from "./helpers.js";
 
 describe("tenant isolation", () => {
+  it("restores and revokes a staff session with CSRF protection", async () => {
+    const { app } = await testApp();
+    const agent = request.agent(app);
+    const login = await agent.post("/api/v1/staff/login").send({ tenantSlug: "demo-harbor-warranty", email: "dispatch@demo-harbor.invalid", password: "demo-dispatch-1234" });
+    const me = await agent.get("/api/v1/staff/me");
+    expect(me.status).toBe(200);
+    expect(me.body.user.id).toBe(login.body.user.id);
+    expect(me.headers["cache-control"]).toBe("no-store");
+    expect((await agent.post("/api/v1/staff/logout")).status).toBe(403);
+    expect((await agent.post("/api/v1/staff/logout").set("x-csrf-token", me.body.csrf)).status).toBe(200);
+    expect((await agent.get("/api/v1/staff/me")).status).toBe(401);
+  });
+
   it("tenant B token cannot read tenant A case", async () => {
     const { app } = await testApp();
     const a = await startSession(app, "pk_demo_phoenix_001");

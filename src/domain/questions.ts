@@ -95,6 +95,11 @@ export function findAction(id: string): CustomerAction | undefined {
   return CUSTOMER_ACTIONS.find((a) => a.action_id === id && a.reviewStatus === "approved");
 }
 
+// Keep retired questions readable for existing conversations, but never ask them again.
+export function isQuestionSelectable(q: Question): boolean {
+  return q.id !== "q_age";
+}
+
 // Pick the next allowed question given collected fact keys and asked question ids.
 export function nextQuestion(args: {
   factKeys: Set<string>;
@@ -112,7 +117,7 @@ export function nextQuestion(args: {
     return want === q.version;
   };
   // Fixed intake spine first.
-  const spine = ["q_category", "q_problem", "q_zip", "q_brand", "q_model", "q_age"];
+  const spine = ["q_category", "q_problem", "q_zip", "q_brand", "q_model"];
   for (const id of spine) {
     const q = findQuestion(id)!;
     if (args.askedIds.has(id)) continue;
@@ -123,6 +128,7 @@ export function nextQuestion(args: {
   }
   // Category follow-ups.
   for (const q of QUESTIONS) {
+    if (!isQuestionSelectable(q)) continue;
     if (args.askedIds.has(q.id)) continue;
     if (q.factKey && args.factKeys.has(q.factKey)) continue;
     if (q.categories && args.category && !q.categories.includes(args.category)) continue;

@@ -1,0 +1,74 @@
+{
+  "id": "tenant_quickfix_phoenix",
+  "slug": "quickfix-phoenix",
+  "name": "QuickFIX Appliance Repair",
+  "demoLabel": "Supervised pilot \u2014 requests require confirmation from QuickFIX.",
+  "orgType": "solo_repair",
+  "branding": {
+    "primaryColor": "#102b45",
+    "logoUrl": null
+  },
+  "contact": {
+    "email": null,
+    "phone": "+1-773-921-5655"
+  },
+  "timezone": "America/Phoenix",
+  "languages": [
+    "en"
+  ],
+  "allowedOrigins": [
+    "https://quickfixphx.com",
+    "https://www.quickfixphx.com"
+  ],
+  "publicKey": "pk_replace_with_random_public_key",
+  "categories": [
+    "refrigerator",
+    "freezer",
+    "washer",
+    "dishwasher",
+    "oven",
+    "dryer",
+    "other"
+  ],
+  "detailedCategories": [
+    "refrigerator",
+    "freezer",
+    "washer",
+    "dishwasher"
+  ],
+  "serviceZips": null,
+  "requireStreetAddress": false,
+  "requiredFields": [
+    "appliance_category",
+    "problem_description",
+    "service_zip",
+    "contact_channel"
+  ],
+  "playbookVersions": {
+    "refrigerator": "v1",
+    "washer": "v1",
+    "dishwasher": "v1",
+    "general": "v1"
+  },
+  "routing": {
+    "destination": "owner-inbox",
+    "queue": "QuickFIX service requests"
+  },
+  "notifications": {
+    "emailEnabled": false,
+    "emailTo": null
+  },
+  "retention": {
+    "draftDays": 7,
+    "closedDays": 90,
+    "logDays": 14
+  },
+  "privacyText": "QuickFIX uses MendCue to collect your appliance problem, contact details and optional photos for its service team. Drafts expire after 7 days; closed requests after 90 days. Submit only details needed for your repair. A request does not confirm a booking or quote.",
+  "openingMessage": "I'm QuickFIX\u2019s AI intake assistant, powered by MendCue. Tell me what\u2019s wrong with your appliance. I\u2019ll collect the details and prepare a summary for the repairman. You can ask for a person at any time.",
+  "gasUtilityContact": "Leave the area and contact your gas utility or emergency services from a safe location.",
+  "featureFlags": {
+    "photos": true,
+    "knowledge": true,
+    "recall": false
+  }
+}

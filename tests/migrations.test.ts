@@ -19,7 +19,7 @@ it("rolls back migration DDL when recording it fails, then safely retries", asyn
     const columns = await query("SELECT column_name FROM information_schema.columns WHERE table_name='background_jobs'");
     expect(columns.rows.map(row => row.column_name)).not.toContain("available_at");
     expect((await query("SELECT name FROM schema_migrations")).rows).toHaveLength(6);
-    expect(await applyMigrations(query, sql => db.exec(sql))).toEqual(["007_durable_outbox.sql", "008_image_provenance.sql"]);
+    expect(await applyMigrations(query, sql => db.exec(sql))).toEqual(["007_durable_outbox.sql", "008_image_provenance.sql", "009_technician_app.sql"]);
     expect((await query("SELECT available_at, lease_version FROM background_jobs")).rows).toEqual([]);
     expect(await applyMigrations(query, sql => db.exec(sql))).toEqual([]);
   } finally { await db.close(); }

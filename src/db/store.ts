@@ -1,3 +1,4 @@
+import type { Appointment } from "../domain/appointments.js";
 // Store interface implemented by Postgres (production) and memory (tests/dev).
 import type {
   Assessment, Attachment, CaseEvent, CaseFact, CaseRecord, Handoff, Hypothesis, Message, TenantConfig,
@@ -46,10 +47,24 @@ export interface OutcomeRecord {
 
 export interface CaseCommit {
   record: CaseRecord; expectedVersion: number; events: CaseEvent[]; jobs: JobRecord[];
-  handoff?: Handoff; assessment?: Assessment;
+  handoff?: Handoff; assessment?: Assessment; appointment?: Appointment;
 }
 
+export interface PushRegistration {
+ id:string; tenantId:string; userId:string; sessionId:string; endpointHash:string; enabled:boolean;
+ endpoint:string; keys:{p256dh:string;auth:string}; createdAt:string; updatedAt:string;
+}
+export interface InboxQuery {view:string;search:string;offset:number;limit:number}
+export interface InboxRow {id:string;reference:string;appliance:unknown;complaint:unknown;zip:unknown;safetyStatus:string;workflowStatus:string;disposition:string;submittedAt:string|null;version:number;brand:unknown;model:unknown}
 export interface Store {
+ listInbox(tenantId:string,query:InboxQuery):Promise<InboxRow[]>;
+ findMutationReceipt(tenantId:string,userId:string,mutationId:string):Promise<CaseEvent|null>;
+
+ listAppointments(tenantId:string):Promise<Appointment[]>;
+ listPushRegistrations(tenantId:string,userId?:string):Promise<PushRegistration[]>;
+ savePushRegistration(registration:PushRegistration):Promise<boolean>;
+ disablePushRegistration(tenantId:string,userId:string,id:string):Promise<void>;
+
   // Compare-and-swap the case and commit its complete outbox in one transaction.
   commitCase(change: CaseCommit): Promise<boolean>;
   listJobs(tenantId: string): Promise<JobRecord[]>;
@@ -123,11 +138,13 @@ export interface Store {
   listDeliveries(tenantId: string, eventId?: string): Promise<WebhookDelivery[]>;
 
   // staff / service / outcomes
+  listStaffUsers(tenantId:string):Promise<StaffUser[]>;
   saveStaffUser(u: StaffUser): Promise<void>;
   getStaffByEmail(tenantId: string, email: string): Promise<StaffUser | null>;
   getStaffById(tenantId: string, id: string): Promise<StaffUser | null>;
   createStaffSession(s: StaffSession): Promise<void>;
   getStaffSession(id: string): Promise<StaffSession | null>;
+  deleteStaffSession(tenantId: string, id: string): Promise<void>;
   saveServiceCredential(c: ServiceCredential): Promise<void>;
   getServiceCredentialByHash(hash: string): Promise<ServiceCredential | null>;
   listServiceCredentials(tenantId: string): Promise<Array<{ name: string; scopes: string[]; createdAt: string }>>;

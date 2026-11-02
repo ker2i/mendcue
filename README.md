@@ -83,3 +83,17 @@ Live mode uses a shared local spending ledger (default $2 lifetime cap,
 $0.50 per case); unknown usage blocks further requests. Reconcile failed
 requests with provider billing before resetting it. Live vision requires
 reviewed billing configuration; manual identity entry remains available.
+
+## Public product demo (GitHub Pages)
+
+A modern static landing page and interactive, clearly labeled synthetic walkthrough
+live in [`demo-site/`](demo-site/README.md). Run `npm run demo:preview` to preview
+and `npm run demo:test` for browser checks. The included Pages workflow publishes
+only that directory; no server or Meta key is required. See the demo README for
+free hosting setup and its explicit simulation boundaries.
+
+## QuickFIX website connection
+
+The actual repairman’s site in `quickfix-site/` can load the existing MendCue widget.
+See [QuickFIX integration](docs/quickfix-integration.md) for tenant provisioning,
+optional Cloudflare Tunnel, public configuration and browser verification.

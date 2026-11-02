@@ -1,4 +1,5 @@
-// MendCue intake client (iframe). Text-only rendering using text nodes.
+// Customer conversation. Authoritative messages stay on the server; optimistic
+// turns use a stable idempotency key and reconcile without rebuilding the thread.
 (function () {
   "use strict";
   var qs = new URLSearchParams(location.search);
@@ -6,473 +7,435 @@
   var publicKey = qs.get("pk") || "";
   var PLATFORM = location.origin;
   var storeKey = "mendcue:" + tenantSlug;
-
   var els = {};
-  ["biz", "privacy", "fixture", "log", "status", "in", "send", "photo", "uploadBtn",
-   "humanBtn", "reviewBtn", "steps", "consentBox", "consentNote", "detailsBox",
-   "detailsBody", "cardBox", "reviewBox", "reviewBody", "photoPreview", "demoBanner"
+  ["biz", "privacy", "fixture", "log", "status", "in", "send", "photo", "uploadBtn", "attachBtn",
+    "humanBtn", "reviewBtn", "newRequestBtn", "steps", "consentBox", "consentNote", "detailsBox", "detailsBody",
+    "cardBox", "reviewBox", "reviewBody", "photoPreview", "demoBanner", "conversation", "helpMenu"
   ].forEach(function (id) { els[id] = document.getElementById(id); });
-
-  var S = { token: null, caseId: null, config: null, state: null, pending: false, bootstrapped: false };
+  var S = { token: null, caseId: null, config: null, state: null, ready: false, pending: false,
+    bootstrapped: false, turn: null, notices: [], nodes: new Map(), busy: null,
+    pollTimer: null, pollGeneration: 0, reviewVersion: null, reviewLoading: false,
+    identitySignature: null, bootstrapListener: null, bootstrapTimer: null };
 
   function el(tag, text, cls) {
-    var e = document.createElement(tag);
-    if (text !== undefined && text !== null) e.textContent = text;
-    if (cls) e.className = cls;
-    return e;
+    var node = document.createElement(tag);
+    if (text !== undefined && text !== null) node.textContent = text;
+    if (cls) node.className = cls;
+    return node;
   }
-  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
-  function notify(kind) { try { window.parent.postMessage({ scope: "mendcue", kind: kind }, "*"); } catch (e) {} }
-  function setStatus(t) { els.status.textContent = t || ""; }
-
-  function say(role, text) {
-    var wrap = el("div", null, role === "c" ? "msg msg-c" : "msg msg-a");
-    wrap.appendChild(el("div", text, "bubble"));
-    els.log.appendChild(wrap);
-    els.log.scrollTop = els.log.scrollHeight;
+  function clear(node) { node.replaceChildren(); }
+  function uid() { return crypto.randomUUID(); }
+  function notify(kind) { window.parent.postMessage({ scope: "mendcue", kind: kind }, "*"); }
+  function setStatus(text) { els.status.textContent = text || ""; }
+  function atBottom() { return els.conversation.scrollHeight - els.conversation.scrollTop - els.conversation.clientHeight < 100; }
+  function scrollDown(force) {
+    if (!S.state || !(S.state.messages || []).length) { els.conversation.scrollTop = 0; return; }
+    if (force || atBottom()) requestAnimationFrame(function () { els.conversation.scrollTop = els.conversation.scrollHeight; });
   }
-
+  function finished() { return S.state && S.state.case.conversationPhase === "submitted"; }
+  function autosize() { els.in.style.height = "auto"; els.in.style.height = Math.min(120, els.in.scrollHeight) + "px"; }
+  function updateControls() {
+    var locked = !S.ready || !!S.busy || S.pending || finished();
+    els.send.disabled = locked || !els.in.value.trim();
+    els.in.disabled = !S.ready || finished();
+    els.newRequestBtn.disabled = !S.ready || !!S.busy || S.pending;
+    els.reviewBtn.disabled = locked || !(S.state && S.state.facts.length);
+    els.humanBtn.disabled = locked;
+    els.uploadBtn.disabled = locked;
+    els.attachBtn.disabled = locked;
+    els.consentBox.disabled = finished();
+    els.log.setAttribute("aria-busy", String(!!S.pending));
+    document.querySelectorAll("#quickBox button, #cardBox button, #reviewBody button").forEach(function (b) { b.disabled = b.id === "newRequest" ? !S.ready : locked; });
+    var thinking = document.getElementById("thinking");
+    if (!thinking) {
+      thinking = el("div", null, "typing-indicator"); thinking.id = "thinking";
+      thinking.setAttribute("role", "status");
+      var dots = el("span", null, "typing-dots"); dots.setAttribute("aria-hidden", "true");
+      for (var i = 0; i < 3; i++) dots.appendChild(el("i"));
+      thinking.append(dots, el("span", "Working on your reply…")); els.log.after(thinking);
+    }
+    thinking.hidden = !S.pending;
+    if (S.busy && !S.pending) setStatus(S.busy);
+  }
   function api(path, opts) {
-    opts = opts || {};
-    opts.headers = opts.headers || {};
+    opts = opts || {}; opts.headers = opts.headers || {};
     if (S.token) opts.headers.authorization = "Bearer " + S.token;
+    opts.signal = AbortSignal.timeout(45000);
     return fetch(PLATFORM + path, opts);
   }
-
+  async function json(response) {
+    var data = await response.json();
+    if (!response.ok) {
+      var error = new Error(data.error && data.error.message || "That didn't go through. Please try again.");
+      error.status = response.status; throw error;
+    }
+    return data;
+  }
   function saveSession() {
-    try { sessionStorage.setItem(storeKey, JSON.stringify({ token: S.token, caseId: S.caseId })); } catch (e) {}
+    try { sessionStorage.setItem(storeKey, JSON.stringify({ token: S.token, caseId: S.caseId, turn: S.turn, draft: els.in.value })); } catch (_) {}
   }
   function loadSession() {
     try {
-      var raw = sessionStorage.getItem(storeKey);
-      if (!raw) return false;
-      var o = JSON.parse(raw);
-      if (!o.token || !o.caseId) return false;
-      S.token = o.token; S.caseId = o.caseId;
-      return true;
-    } catch (e) { return false; }
+      var data = JSON.parse(sessionStorage.getItem(storeKey) || "null");
+      if (!data || !data.token || !data.caseId) return false;
+      S.token = data.token; S.caseId = data.caseId; S.turn = data.turn || null;
+      els.in.value = typeof data.draft === "string" ? data.draft.slice(0, 4000) : ""; autosize(); return true;
+    } catch (_) { return false; }
   }
-  function dropSession() { try { sessionStorage.removeItem(storeKey); } catch (e) {} }
-
-  function stepsFor(state) {
-    var facts = {};
-    (state.facts || []).forEach(function (f) { facts[f.key] = f.value; });
-    var steps = [
-      { id: "appliance", label: "Appliance", done: !!facts.appliance_category },
-      { id: "problem", label: "Problem", done: !!facts.problem_description },
-      { id: "details", label: "Details", done: !!(facts.brand || facts.model_number || facts.service_zip) },
-      { id: "review", label: "Review", done: state.case.conversationPhase === "review" || state.case.conversationPhase === "submitted" },
-    ];
-    clear(els.steps);
-    steps.forEach(function (st, i) {
-      var s = el("span", (i + 1) + ". " + st.label + (st.done ? " ✓" : ""), st.done ? "on" : null);
-      els.steps.appendChild(s);
+  function dropSession() { try { sessionStorage.removeItem(storeKey); } catch (_) {} }
+  function messageNode(key, role, text, greeting) {
+    var node = S.nodes.get(key);
+    if (!node) {
+      node = el("div", null, "msg " + (role === "customer" ? "msg-c" : "msg-a") + (greeting ? " greeting" : ""));
+      node.append(el("span", role === "customer" ? "You" : "MendCue", "message-author"), el("div", text, "bubble"));
+      S.nodes.set(key, node);
+    } else if (node.querySelector(".bubble").textContent !== text) node.querySelector(".bubble").textContent = text;
+    return node;
+  }
+  function syncMessages(force) {
+    var pinned = force || atBottom();
+    var rows = [];
+    if (S.config) rows.push({ id: "greeting", role: "assistant", body: S.config.openingMessage, greeting: true });
+    var messages = S.state && S.state.messages || [];
+    rows = rows.concat(messages);
+    if (S.turn && !messages.some(function (m) { return m.id === S.turn.messageId; })) {
+      rows.push({ id: S.turn.key, role: "customer", body: S.turn.body });
+    }
+    rows = rows.concat(S.notices);
+    var cursor = els.log.firstElementChild, keep = new Set();
+    rows.forEach(function (m) {
+      keep.add(m.id);
+      var node = messageNode(m.id, m.role, m.body, m.greeting);
+      if (node !== cursor) els.log.insertBefore(node, cursor);
+      cursor = node.nextElementSibling;
     });
+    while (cursor) { var next = cursor.nextElementSibling; cursor.remove(); cursor = next; }
+    S.nodes.forEach(function (_, key) { if (!keep.has(key)) S.nodes.delete(key); });
+    scrollDown(pinned);
   }
-
-  function renderDetails(state) {
+  function say(role, text) {
+    S.notices.push({ id: uid(), role: role === "c" ? "customer" : "assistant", body: text });
+    syncMessages(true);
+  }
+  function renderDetails(st) {
+    var labels = { appliance_category: "Appliance", brand: "Brand", model_number: "Model", service_zip: "ZIP code", error_code: "Error code", contact_channel: "Contact", preferred_window: "Preferred time" };
     clear(els.detailsBody);
-    var show = ["appliance_category", "brand", "model_number", "service_zip", "error_code", "contact_channel", "preferred_window"];
-    var map = {};
-    (state.facts || []).forEach(function (f) { map[f.key] = f.value; });
-    var any = false;
-    show.forEach(function (k) {
-      if (map[k] === undefined || map[k] === null || map[k] === "") return;
-      any = true;
-      els.detailsBody.appendChild(el("div", k.replace(/_/g, " ") + ": " + map[k]));
+    (st.facts || []).forEach(function (fact) {
+      if (labels[fact.key] && fact.value !== null) els.detailsBody.appendChild(el("p", labels[fact.key] + ": " + fact.value));
     });
-    if (!any) els.detailsBody.appendChild(el("div", "Nothing collected yet.", "muted"));
+    if (!els.detailsBody.childNodes.length) els.detailsBody.appendChild(el("p", "Your repair details will appear here as we talk."));
   }
-
   function quickReplies() {
-    // Contextual quick replies based on the latest assistant question.
-    var msgs = (S.state && S.state.messages) || [];
-    var last = null;
-    for (var i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === "assistant") { last = msgs[i].body; break; }
-    }
-    var box = document.getElementById("quickBox");
-    clear(box);
-    if (!last) return;
-    var opts = [];
-    if (/which appliance/i.test(last)) opts = ["Refrigerator", "Washer", "Dishwasher", "Other"];
-    else if (/ZIP/i.test(last)) opts = [];
-    else if (/brand|model|old/i.test(last)) opts = ["I don't know", "Skip"];
-    else if (/correct\?|confirm the exact model/i.test(last)) opts = ["Yes", "No", "Label inaccessible"];
-    else opts = ["Not sure", "Skip", "Talk to a person"];
-    opts.forEach(function (o) {
-      var b = el("button", o);
-      b.type = "button";
-      b.onclick = function () {
-        if (o === "Talk to a person") { requestHuman(); return; }
-        els.in.value = o;
-        send();
-      };
-      box.appendChild(b);
+    clear(document.getElementById("quickBox"));
+    if (!S.ready || S.pending || S.busy || finished() || S.state && S.state.case.conversationPhase === "review") return;
+    var messages = S.state && S.state.messages || [];
+    var last = messages.filter(function (m) { return m.role === "assistant"; }).at(-1);
+    var text = last ? last.body : "Which appliance";
+    var options = [];
+    if (/which appliance/i.test(text)) options = ["Refrigerator", "Washer", "Dishwasher", "Other"];
+    else if (/confirm.*model|correct\?/i.test(text)) return; // The identity card owns this decision.
+    else if (/brand|model number|how old/i.test(text)) options = ["I'm not sure", "Label inaccessible"];
+    else if (/\?$/.test(text.trim()) && !/ZIP|phone|email|name/i.test(text)) options = ["I'm not sure"];
+    options.forEach(function (text) {
+      var button = el("button", text); button.type = "button";
+      button.onclick = function () { send(text); };
+      document.getElementById("quickBox").appendChild(button);
     });
   }
-
-  function render(resumed) {
-    var st = S.state;
-    if (!st) return;
+  function render() {
+    var st = S.state; if (!st) return;
+    var pinned = atBottom();
     var warning = document.getElementById("safetyBanner");
-    if (!warning) { warning = el("div", null, "safety-banner"); warning.id = "safetyBanner"; warning.setAttribute("role", "alert"); els.log.parentNode.insertBefore(warning, els.log); }
+    if (!warning) { warning = el("div", null, "safety-banner"); warning.id = "safetyBanner"; warning.setAttribute("role", "alert"); els.conversation.prepend(warning); }
     var urgent = ["emergency", "stop_use", "needs_review"].includes(st.case.safetyStatus);
     warning.hidden = !urgent;
-    warning.textContent = st.case.safetyStatus === "emergency" ? "Emergency reported. Leave the area, avoid switches and flames, and contact emergency services and your gas utility from a safe location. This request is not emergency assistance." : urgent ? "Safety concern reported. Stop using the appliance. A person must review this request; do not attempt additional checks." : "";
-    stepsFor(st);
-    renderDetails(st);
-    if (resumed) {
-      clear(els.log);
-      (st.messages || []).forEach(function (m) { say(m.role === "customer" ? "c" : "a", m.body); });
-    }
-    els.fixture.textContent = st.fixtureNotice || "";
-    quickReplies();
-    renderCard(st);
-    if (st.case.conversationPhase === "review") loadReview();
-    else { els.reviewBox.style.display = "none"; }
-    if (st.case.conversationPhase === "submitted") showSubmitted(st);
+    warning.textContent = st.case.safetyStatus === "emergency" ? "Emergency reported. Leave the area, avoid switches and flames, and contact emergency services and your gas utility from a safe location. This chat is not emergency assistance." : urgent ? "Please stop using the appliance. A person needs to review this safety concern. Do not attempt additional checks." : "";
+    els.fixture.hidden = st.modelMode === "live";
+    els.fixture.textContent = st.modelMode === "fallback" ? "The AI connection is having trouble. I can still collect the basics for the service team." : "Demonstration mode — these replies use development fixtures.";
+    renderDetails(st); syncMessages(false); renderCard(st); quickReplies();
+    if (finished()) showSubmitted(st);
+    else if (st.case.conversationPhase === "review") loadReview();
+    else els.reviewBox.style.display = "none";
+    updateControls(); scrollDown(pinned);
   }
-
   function renderCard(st) {
-    clear(els.cardBox);
+    var current = {}; (st.facts || []).forEach(function (f) { current[f.key] = f.value; });
     var p = st.case.pendingAction;
-    var current = {};
-    (st.facts || []).forEach(function(f) { current[f.key] = f.value; });
-    if (!p && !current.model_number && !current.model_number_raw && !current.appliance_category) return;
-    if (st.case.conversationPhase === "submitted") return;
-    var card = el("div", null, "label-card");
-    card.appendChild(el("h3", current.model_confirmed ? "Confirmed by you" : "Please confirm appliance identity"));
-    card.appendChild(el("p", "This confirms the label transcription. The service team will verify the appliance and documentation.", "muted"));
-    var identityPhoto = p && p.attachmentId;
-    if (!identityPhoto) (st.facts || []).forEach(function(f) { if (["model_number", "model_number_raw"].includes(f.key) && f.sourceAttachmentId) identityPhoto = f.sourceAttachmentId; });
-    if (identityPhoto) {
-      var photo = el("img", null, "thumb"); photo.alt = "Uploaded appliance label";
-      card.appendChild(photo);
-      api("/api/v1/cases/" + S.caseId + "/attachments/" + identityPhoto).then(function(r) { return r.blob(); }).then(function(blob) {
-        var url = URL.createObjectURL(blob); photo.onload = function() { URL.revokeObjectURL(url); }; photo.src = url;
-      }).catch(function() { photo.alt = "Label preview unavailable; the saved fields remain editable."; });
+    if (finished() || st.case.conversationPhase === "review" || !current.model_number && !current.model_number_raw && !(p && p.kind === "model_confirm")) {
+      clear(els.cardBox); S.identitySignature = null; return;
     }
-    function field(label, value) {
-      var wrap = el("label", label); var f = document.createElement("input");
-      f.type = "text"; f.value = value || ""; wrap.appendChild(f); card.appendChild(wrap); return f;
+    var signature = JSON.stringify([current.brand, current.model_number, current.model_number_raw, current.serial_number, current.model_confirmed, p]);
+    if (S.identitySignature === signature) return;
+    S.identitySignature = signature; clear(els.cardBox);
+    var card = el("details", null, "label-card"); card.open = !!(p && p.kind === "model_confirm");
+    card.appendChild(el("summary", current.model_confirmed ? "Appliance details · confirmed by you" : "Check your appliance details"));
+    card.appendChild(el("p", "Please check the label details before they reach your technician. You can leave the serial number blank.", "muted"));
+    var photoId = p && p.attachmentId;
+    if (photoId) {
+      var image = el("img", null, "thumb"); image.alt = "Uploaded appliance label"; card.appendChild(image);
+      api("/api/v1/cases/" + S.caseId + "/attachments/" + photoId).then(function (r) { if (!r.ok) throw Error(); return r.blob(); }).then(function (blob) {
+        var url = URL.createObjectURL(blob); image.onload = image.onerror = function () { URL.revokeObjectURL(url); }; image.src = url;
+      }).catch(function () { image.alt = "Preview unavailable. You can still check the saved details."; });
     }
-    var brand = field("Brand as printed", current.brand);
-    var input = field("Model number", (p && p.modelRaw) || current.model_number_raw || current.model_number);
-    var serial = field("Serial number (optional)", current.serial_number);
-    var row = el("div", null, "quick");
-    var yes = el("button", "Confirm");
-    yes.onclick = function () { confirmModel(true, input.value, brand.value, serial.value); };
-    var no = el("button", "Not correct");
+    function field(label, value) { var wrap = el("label", label), input = el("input"); input.type = "text"; input.value = value || ""; wrap.appendChild(input); card.appendChild(wrap); return input; }
+    var brand = field("Brand", current.brand), model = field("Model number", p && p.modelRaw || current.model_number_raw || current.model_number), serial = field("Serial number (optional)", current.serial_number);
+    var row = el("div", null, "quick"), yes = el("button", "Confirm details"), no = el("button", "I can't read the label");
+    yes.onclick = function () { confirmModel(true, model.value, brand.value, serial.value); };
     no.onclick = function () { confirmModel(false, null); };
-    row.appendChild(yes); row.appendChild(no);
-    card.appendChild(row);
-    els.cardBox.appendChild(card);
+    row.append(yes, no); card.appendChild(row); els.cardBox.appendChild(card);
   }
-
-  function confirmModel(confirm, corrected, brand, serial) {
-    setStatus("Confirming…");
-    var body = { confirm: confirm, brand: brand, serialNumber: serial };
-    if (corrected) body.correctedModel = corrected;
-    api("/api/v1/cases/" + S.caseId + "/confirm-model", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-    }).then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
-      .then(function (o) {
-        if (o.j.confirmed) { say("a", "Thanks — model recorded as " + o.j.model + "."); refresh(); }
-        else if (!confirm) { say("a", "No problem — type the model exactly as shown, or say \"label inaccessible\"."); refresh(); }
-        else say("a", (o.j.error && o.j.error.message) || "That value was not accepted.");
-        setStatus("");
-      })
-      .catch(function () { setStatus("Network error — retry."); });
-  }
-
-  function loadReview() {
-    api("/api/v1/cases/" + S.caseId + "/review").then(function (r) { return r.json(); })
-      .then(function (rev) {
-        els.reviewBox.style.display = "block";
-        clear(els.reviewBody);
-        rev.sections.forEach(function (sec) {
-          var box = el("div", null, "rev-section");
-          box.appendChild(el("h3", sec.title));
-          sec.rows.forEach(function (row) {
-            var r2 = el("div", null, "rev-row");
-            r2.appendChild(el("span", row.label, "rev-label"));
-            var val = row.value === null || row.value === undefined || row.value === ""
-              ? el("span", "Missing", "rev-missing")
-              : el("span", String(row.value), "rev-val");
-            r2.appendChild(val);
-            var edit = el("button", "Edit", "btn rev-edit");
-            edit.onclick = function () { editRow(rev, row, r2); };
-            if (row.editable) r2.appendChild(edit);
-            box.appendChild(r2);
-          });
-          els.reviewBody.appendChild(box);
-        });
-        var miss = rev.missing && rev.missing.length
-          ? "Missing required: " + rev.missing.join(", ") + "."
-          : "All required details are present.";
-        els.reviewBody.appendChild(el("p", miss, rev.missing && rev.missing.length ? "rev-missing" : "muted"));
-        var sendBtn = el("button", "Send request to " + rev.businessName, "btn btn-primary");
-        sendBtn.onclick = function () { submit(false); };
-        els.reviewBody.appendChild(sendBtn);
-        if (rev.requiresIncompleteAck) {
-          var note = el("p", "Some required details are missing. You can still send an incomplete request.", "muted");
-          els.reviewBody.appendChild(note);
-          var inc = el("button", "Send incomplete request", "btn");
-          inc.onclick = function () { submit(true); };
-          els.reviewBody.appendChild(inc);
-        }
-        els.reviewBody.appendChild(el("p", "The " + rev.queue + " will follow up. Scheduling is confirmed by the service team.", "muted"));
-      })
-      .catch(function () { setStatus("Could not load the review — retry."); });
-  }
-
-  function editRow(rev, row, container) {
-    clear(container);
-    container.appendChild(el("span", row.label, "rev-label"));
-    var input = document.createElement("input");
-    input.type = "text";
-    input.value = row.value === null || row.value === undefined ? "" : String(row.value);
-    container.appendChild(input);
-    var save = el("button", "Save", "btn rev-edit");
-    save.onclick = function () {
-      api("/api/v1/cases/" + S.caseId + "/facts", {
-        method: "PATCH", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ key: row.key, value: input.value, version: S.state.case.version }),
-      }).then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
-        .then(function (o) {
-          if (!o.r.ok) { say("a", (o.j.error && o.j.error.message) || "Save failed."); return; }
-          refresh().then(loadReview);
-        });
-    };
-    var cancel = el("button", "Cancel", "btn rev-edit");
-    cancel.onclick = function () { loadReview(); };
-    container.appendChild(save);
-    container.appendChild(cancel);
-  }
-
-  function submit(ack) {
-    setStatus("Sending…");
-    api("/api/v1/cases/" + S.caseId + "/submit", {
-      method: "POST", headers: { "content-type": "application/json", "idempotency-key": "ui-" + Date.now() },
-      body: JSON.stringify({ acknowledgeIncomplete: !!ack }),
-    }).then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
-      .then(function (o) {
-        setStatus("");
-        if (!o.r.ok) {
-          say("a", (o.j.error && o.j.error.message) || "Send failed." + (o.j.missing ? " Missing: " + o.j.missing.join(", ") : ""));
-          return;
-        }
-        refresh().then(function () { showSubmitted(S.state, o.j.reference); });
-        notify("intake.submitted");
-      })
-      .catch(function () { setStatus("Network error — your input is kept; retry."); });
-  }
-
-  function showSubmitted(st, ref) {
-    els.reviewBox.style.display = "block";
-    clear(els.reviewBody);
-    var c = st.case;
-    els.reviewBody.appendChild(el("h3", "Request sent"));
-    els.reviewBody.appendChild(el("p", "Your reference is " + (ref || c.reference || "") + "."));
-    els.reviewBody.appendChild(el("p", "The service team will follow up. Scheduling is confirmed by the team, not by this chat.", "muted"));
-    els.in.disabled = true;
-    els.send.disabled = true;
-    els.reviewBtn.disabled = true;
-  }
-
-  function refresh() {
-    return api("/api/v1/cases/" + S.caseId).then(function (r) {
-      if (r.status === 401) { dropSession(); needBootstrap("Your session expired. Start over to begin a new request."); return null; }
-      return r.json();
-    }).then(function (st) {
-      if (!st) return null;
-      S.state = st;
-      render(false);
-      var warning = document.getElementById("safetyBanner");
-    if (!warning) { warning = el("div", null, "safety-banner"); warning.id = "safetyBanner"; warning.setAttribute("role", "alert"); els.log.parentNode.insertBefore(warning, els.log); }
-    var urgent = ["emergency", "stop_use", "needs_review"].includes(st.case.safetyStatus);
-    warning.hidden = !urgent;
-    warning.textContent = st.case.safetyStatus === "emergency" ? "Emergency reported. Leave the area, avoid switches and flames, and contact emergency services and your gas utility from a safe location. This request is not emergency assistance." : urgent ? "Safety concern reported. Stop using the appliance. A person must review this request; do not attempt additional checks." : "";
-    stepsFor(st); renderDetails(st); quickReplies(); renderCard(st);
-      return st;
-    });
-  }
-
-  function pollUntil(n, tries) {
-    tries = tries === undefined ? 20 : tries;
-    if (tries <= 0) { S.pending = false; els.send.disabled = false; setStatus("Still working — new replies will appear automatically."); return; }
-    setTimeout(function () {
-      api("/api/v1/cases/" + S.caseId).then(function (r) { return r.json(); }).then(function (st) {
-        S.state = st;
-        var count = (st.messages || []).length;
-        if (count > n) {
-          render(true);
-          S.pending = false; els.send.disabled = false; setStatus("");
-          if (st.case.conversationPhase === "review") loadReview();
-        } else {
-          setStatus("Working…");
-          pollUntil(n, tries - 1);
-        }
-      }).catch(function () { pollUntil(n, tries - 1); });
-    }, 2000);
-  }
-
-  function send() {
-    var body = els.in.value.trim();
-    if (!body || S.pending) return;
-    S.pending = true;
-    els.send.disabled = true;
-    var consent = els.consentBox.checked;
-    say("c", body);
-    var before = (S.state && S.state.messages ? S.state.messages.length : 0) + 1;
-    setStatus("Sending…");
-    api("/api/v1/cases/" + S.caseId + "/messages", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ body: body, consent: consent }),
-    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
-      .then(function (o) {
-        els.in.value = "";
-        if (o.status === 202) { pollUntil(before); return; } // queued mode
-        S.pending = false; els.send.disabled = false; setStatus("");
-        if (o.j.reply) say("a", o.j.reply);
-        else say("a", (o.j.error && o.j.error.message) || "Something went wrong.");
-        refresh();
-      })
-      .catch(function () {
-        // Network failure: input is preserved in the field for retry.
-        els.in.value = body;
-        S.pending = false; els.send.disabled = false;
-        setStatus("Network error — your message is kept above. Check your connection and retry.");
-      });
-  }
-
-  function requestHuman() {
-    api("/api/v1/cases/" + S.caseId + "/request-human", { method: "POST" })
-      .then(function (r) { return r.json(); })
-      .then(function (j) { say("a", j.reply || "Flagged for a person."); refresh(); })
-      .catch(function () { setStatus("Network error — retry."); });
-  }
-
-  function upload() {
-    var f = els.photo.files && els.photo.files[0];
-    if (!f) { setStatus("Choose a photo first (JPEG, PNG, or WebP, up to 8 MB)."); return; }
-    clear(els.photoPreview);
+  async function confirmModel(confirm, corrected, brand, serial) {
+    if (S.pending || S.busy) return;
+    S.busy = "Saving appliance details…"; updateControls();
     try {
-      var img = document.createElement("img");
-      img.src = URL.createObjectURL(f);
-      img.className = "thumb";
-      img.alt = "Selected photo preview";
-      els.photoPreview.appendChild(img);
-    } catch (e) {}
-    setStatus("Uploading photo…");
-    var fd = new FormData();
-    fd.append("photo", f);
-    fd.append("kind", "label_photo");
-    var before = (S.state && S.state.messages ? S.state.messages.length : 0);
-    fetch(PLATFORM + "/api/v1/cases/" + S.caseId + "/attachments", {
-      method: "POST", headers: { authorization: "Bearer " + S.token }, body: fd,
-    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
-      .then(function (o) {
-        if (o.status === 202) { say("a", o.j.reply || "Photo received — reading the label."); pollUntil(before); return; }
-        say("a", o.j.reply || ((o.j.error && o.j.error.message) || "Photo stored."));
-        setStatus("");
-        refresh();
-      })
-      .catch(function () { setStatus("Upload failed — retry."); });
+      var body = { confirm: confirm, brand: brand, serialNumber: serial }; if (corrected) body.correctedModel = corrected;
+      var result = await api("/api/v1/cases/" + S.caseId + "/confirm-model", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(json);
+      await refresh();
+      say("a", result.confirmed ? "Thank you — I've saved those appliance details for the technician." : "That's okay. Type what you can read, or say ‘label inaccessible’ and we'll continue.");
+      setStatus("");
+    } catch (_) { setStatus("I couldn't save that. Your entries are still here — please try again."); }
+    finally { S.busy = null; updateControls(); }
   }
-
-  function needBootstrap(msg) {
-    say("a", msg);
-    var b = el("button", "Start over", "btn");
-    b.onclick = function () { dropSession(); notify("intake.restart"); say("a", "Starting a new request…"); };
-    els.log.appendChild(b);
-  }
-
-  function boot() {
-    if (!publicKey) { say("a", "This intake panel was not configured correctly."); return; }
-    fetch(PLATFORM + "/api/v1/public/widget-config/" + encodeURIComponent(publicKey))
-      .then(function (r) {
-        if (!r.ok) throw new Error("config");
-        return r.json();
-      })
-      .then(function (cfg) {
-        S.config = cfg;
-        els.biz.textContent = cfg.businessName + " — appliance service request";
-        els.privacy.textContent = cfg.privacyText || "";
-        els.demoBanner.textContent = cfg.demoLabel || "";
-        try {
-          if (cfg.branding && cfg.branding.primaryColor) {
-            document.body.style.setProperty("--primary", cfg.branding.primaryColor);
-          }
-        } catch (e) {}
-        document.title = cfg.businessName + " — service request";
-        // Announce readiness, then resume or wait for the bootstrap code.
-        notify("intake.booted");
-        if (loadSession()) {
-          api("/api/v1/cases/" + S.caseId).then(function (r) {
-            if (!r.ok) { dropSession(); waitForBootstrap(); return; }
-            return r.json();
-          }).then(function (st) {
-            if (!st) return;
-            S.state = st;
-            render(true);
-            if (!(st.messages || []).length) say("a", cfg.openingMessage);
-          }).catch(function () { waitForBootstrap(); });
-        } else {
-          waitForBootstrap();
-          if (cfg.openingMessage) say("a", cfg.openingMessage);
-        }
-      })
-      .catch(function () { say("a", "Intake is unavailable right now."); });
-  }
-
-  function waitForBootstrap() {
-    function onMsg(ev) {
-      // Strictly checked: only our embedding parent may deliver the code,
-      // and the code itself is single-use and short-lived server-side.
-      if (ev.source !== window.parent) return;
-      var d = ev.data || {};
-      if (d.scope !== "mendcue-bootstrap" || !d.code || !d.caseId) return;
-      window.removeEventListener("message", onMsg);
-      exchange(d.code, d.caseId);
-    }
-    window.addEventListener("message", onMsg);
-    // If the host already posted before we listened, ask for a resend.
-    notify("intake.booted");
-    setTimeout(function () {
-      if (!S.bootstrapped && !S.token) needBootstrap("Still waiting for the host page. You can start over to retry.");
-    }, 15000);
-  }
-
-  function exchange(code, caseId) {
-    fetch(PLATFORM + "/api/v1/sessions/exchange", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: code }),
-    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
-      .then(function (o) {
-        if (o.status !== 200 || !o.j.token) {
-          needBootstrap("This intake link expired. Start over to begin a new request.");
-          return;
-        }
-        S.bootstrapped = true;
-        S.token = o.j.token;
-        S.caseId = o.j.caseId || caseId;
-        saveSession();
-        notify("intake.bootstrapped");
-        setStatus("");
-        api("/api/v1/cases/" + S.caseId).then(function (r) { return r.json(); }).then(function (st) {
-          S.state = st;
-          render(true);
-          if (!(st.messages || []).length && S.config.openingMessage) say("a", S.config.openingMessage);
+  async function loadReview() {
+    if (S.reviewLoading || S.reviewVersion === S.state.case.version) return;
+    S.reviewLoading = true; var version = S.state.case.version, caseId = S.caseId;
+    try {
+      var rev = await api("/api/v1/cases/" + S.caseId + "/review").then(json);
+      if (S.caseId !== caseId || !S.state || finished() || S.state.case.conversationPhase !== "review" || version !== S.state.case.version) return;
+      els.reviewBox.style.display = "block"; clear(els.reviewBody);
+      rev.sections.forEach(function (section) {
+        var box = el("div", null, "rev-section"); box.appendChild(el("h3", section.title));
+        var extra = el("details", null, "review-extra"); extra.appendChild(el("summary", "Add optional details"));
+        section.rows.forEach(function (row) {
+          var optionalBlank = (row.value === null || row.value === undefined || row.value === "") && !(rev.missing || []).includes(row.key);
+          var line = el("div", null, "rev-row"); line.appendChild(el("span", row.label, "rev-label"));
+          line.appendChild(el("span", row.value === null || row.value === undefined || row.value === "" ? "Not provided" : String(row.value), "rev-val"));
+          if (row.editable) { var edit = el("button", "Edit", "btn rev-edit"); edit.onclick = function () { editRow(row, line); }; line.appendChild(edit); }
+          (optionalBlank ? extra : box).appendChild(line);
         });
-      })
-      .catch(function () { needBootstrap("Network error during setup. Start over to retry."); });
+        if (extra.childNodes.length > 1) box.appendChild(extra);
+        els.reviewBody.appendChild(box);
+      });
+      var sendButton = el("button", "Send request to " + rev.businessName, "btn btn-primary"); sendButton.onclick = function () { submit(false); }; els.reviewBody.appendChild(sendButton);
+      if (rev.requiresIncompleteAck) {
+        els.reviewBody.appendChild(el("p", "A few details are missing. You can add them above or send what you have.", "muted"));
+        var incomplete = el("button", "Send with missing details", "btn"); incomplete.onclick = function () { submit(true); }; els.reviewBody.appendChild(incomplete);
+      }
+      els.reviewBody.appendChild(el("p", "Please check these details before sending. The team will confirm availability and pricing with you.", "muted"));
+      S.reviewVersion = version; updateControls(); scrollDown(true);
+    } catch (_) { if (S.caseId === caseId) setStatus("I couldn't load your summary. Choose Review request to try again."); }
+    finally { if (S.caseId === caseId) S.reviewLoading = false; }
   }
-
-  els.send.onclick = send;
-  els.in.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+  function editRow(row, container) {
+    clear(container); container.appendChild(el("span", row.label, "rev-label"));
+    var input = el("input"); input.type = "text"; input.value = row.value == null ? "" : String(row.value); container.appendChild(input); input.focus();
+    var save = el("button", "Save", "btn rev-edit");
+    save.onclick = async function () {
+      save.disabled = true;
+      try {
+        await api("/api/v1/cases/" + S.caseId + "/facts", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: row.key, value: input.value, version: S.state.case.version }) }).then(json);
+        S.reviewVersion = null; await refresh();
+      } catch (error) { setStatus(error.message || "Your changes couldn't be saved. Please try again."); save.disabled = false; }
+    };
+    var cancel = el("button", "Cancel", "btn rev-edit"); cancel.onclick = function () { S.reviewVersion = null; loadReview(); };
+    container.append(save, cancel);
+  }
+  async function submit(ack) {
+    if (S.pending || S.busy || finished()) return;
+    S.busy = "Sending your request…"; updateControls();
+    try {
+      await api("/api/v1/cases/" + S.caseId + "/submit", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "submit-" + S.caseId }, body: JSON.stringify({ acknowledgeIncomplete: !!ack }) }).then(json);
+      await refresh(); notify("intake.submitted"); setStatus(""); scrollDown(true);
+    } catch (error) { setStatus(error.message || "I couldn't send your request. Please try again."); }
+    finally { S.busy = null; updateControls(); }
+  }
+  function showSubmitted(st) {
+    S.pending = false; S.turn = null; saveSession();
+    if (els.reviewBox.dataset.sent === st.case.reference) return;
+    els.reviewBox.dataset.sent = st.case.reference; els.reviewBox.style.display = "block"; clear(els.reviewBody);
+    els.reviewBody.append(el("h3", "Your request is on its way"), el("p", "Thank you! Your reference is " + st.case.reference + "."), el("p", "The service team will follow up using the contact details you provided. They'll confirm your appointment and pricing with you.", "muted"));
+    var restart = el("button", "Start a new request", "btn-primary"); restart.id = "newRequest"; restart.onclick = restartChat; els.reviewBody.appendChild(restart);
+    clear(document.getElementById("quickBox")); setStatus("");
+  }
+  async function refresh() {
+    var response = await api("/api/v1/cases/" + S.caseId);
+    if (response.status === 401) { dropSession(); S.ready = false; updateControls(); needBootstrap("Your session expired. Start a new request to continue."); throw Error("Session expired"); }
+    var st = await json(response); S.state = st; render(); return st;
+  }
+  function stopPoll() { clearTimeout(S.pollTimer); S.pollTimer = null; S.pollGeneration++; }
+  function completeTurn(st) {
+    if (!S.turn) return true;
+    var messages = st.messages || [], index = messages.findIndex(function (m) { return m.id === S.turn.messageId; });
+    return index >= 0 && messages.slice(index + 1).some(function (m) { return m.role === "assistant"; });
+  }
+  function pollUntil() {
+    stopPoll(); var generation = S.pollGeneration;
+    async function tick() {
+      if (generation !== S.pollGeneration || !S.pending) return;
+      try {
+        var st = await api("/api/v1/cases/" + S.caseId).then(json);
+        if (generation !== S.pollGeneration) return;
+        S.state = st;
+        if (completeTurn(st) || st.case.conversationPhase === "submitted") {
+          S.pending = false; S.turn = null; saveSession(); setStatus(""); render(); return;
+        }
+        render();
+        setStatus(Date.now() - S.turn.createdAt > 45000 ? "This is taking a little longer. I'll keep checking for your reply." : "Working on your reply…");
+      } catch (error) {
+        if (generation !== S.pollGeneration) return;
+        if (error.status === 401) { S.pending = false; S.ready = false; dropSession(); updateControls(); needBootstrap("Your session expired. Start a new request to continue."); return; }
+        setStatus("Connection interrupted. Your message is saved; reconnecting…");
+      }
+      if (generation === S.pollGeneration && S.pending) S.pollTimer = setTimeout(tick, 2000);
+    }
+    S.pollTimer = setTimeout(tick, 800);
+  }
+  async function sendPending() {
+    if (!S.turn || S.pending || S.busy || !S.ready || finished()) return;
+    S.pending = true; S.turn.failed = false; clear(document.getElementById("quickBox"));
+    S.notices = []; syncMessages(true); updateControls(); setStatus("Sending…");
+    try {
+      var response = await api("/api/v1/cases/" + S.caseId + "/messages", {
+        method: "POST", headers: { "content-type": "application/json", "idempotency-key": S.turn.key },
+        body: JSON.stringify({ body: S.turn.body, consent: S.turn.consent }),
+      });
+      var status = response.status, result = await json(response);
+      S.turn.messageId = result.messageId; S.turn.acknowledged = true; saveSession();
+      if (status === 202) { setStatus("Working on your reply…"); pollUntil(); return; }
+      await refresh();
+      S.pending = false; S.turn = null; saveSession(); setStatus(""); render();
+    } catch (error) {
+      S.pending = false;
+      if (S.turn && S.turn.acknowledged) { S.pending = true; pollUntil(); return; }
+      if (S.turn) S.turn.failed = true; saveSession();
+      setStatus(error.status ? error.message : "Your message hasn't been confirmed. Retry it below — your words are kept.");
+      var retry = el("button", "Retry message", "message-retry"); retry.id = "retryMessage";
+      retry.onclick = function () { retry.remove(); sendPending(); }; els.status.appendChild(retry);
+    } finally { updateControls(); }
+  }
+  function send(text) {
+    if (S.pending || S.busy || !S.ready || finished()) return;
+    var body = typeof text === "string" ? text.trim() : els.in.value.trim(); if (!body) return;
+    var oldRetry = document.getElementById("retryMessage"); if (oldRetry) oldRetry.remove();
+    S.turn = { key: uid(), body: body, consent: els.consentBox.checked, messageId: null, createdAt: Date.now(), acknowledged: false };
+    // Clear only at dispatch. A draft typed while waiting is never erased by a reply.
+    if (typeof text !== "string") { els.in.value = ""; autosize(); }
+    saveSession(); sendPending();
+  }
+  async function requestHuman() {
+    if (S.pending || S.busy || !S.ready || finished()) return;
+    els.helpMenu.open = false; S.busy = "Letting the team know…"; updateControls();
+    try { await api("/api/v1/cases/" + S.caseId + "/request-human", { method: "POST" }).then(json); await refresh(); setStatus(""); scrollDown(true); }
+    catch (_) { setStatus("I couldn't reach the team. Please try again, or call the business directly."); }
+    finally { S.busy = null; updateControls(); }
+  }
+  async function upload() {
+    var file = els.photo.files && els.photo.files[0]; if (!file) { els.photo.click(); return; }
+    if (S.pending || S.busy || !S.ready || finished()) return;
+    if (file.size > 8 * 1024 * 1024 || !["image/jpeg", "image/png", "image/webp"].includes(file.type)) { setStatus("Please choose a JPEG, PNG or WebP photo smaller than 8 MB."); els.photo.value = ""; return; }
+    els.helpMenu.open = false; S.busy = "Uploading your photo…"; updateControls();
+    var form = new FormData(); form.append("photo", file); form.append("kind", "label_photo");
+    var beforeIds = new Set((S.state.messages || []).map(function (m) { return m.id; }));
+    try {
+      var response = await api("/api/v1/cases/" + S.caseId + "/attachments", { method: "POST", body: form });
+      var status = response.status, result = await json(response);
+      if (status === 202) {
+        S.pending = true; S.busy = null; updateControls(); setStatus("Reading your label…");
+        // Upload jobs do not have a customer message: poll for a new assistant reply.
+        stopPoll(); var generation = S.pollGeneration;
+        var tick = async function () {
+          if (generation !== S.pollGeneration) return;
+          try {
+            var st = await refresh();
+            if ((st.messages || []).some(function (m) { return m.role === "assistant" && !beforeIds.has(m.id); })) { S.pending = false; setStatus(""); updateControls(); scrollDown(true); return; }
+          } catch (_) { setStatus("Your photo is saved. Reconnecting to check the reply…"); }
+          if (generation === S.pollGeneration) S.pollTimer = setTimeout(tick, 2000);
+        }; S.pollTimer = setTimeout(tick, 1000);
+      } else { await refresh(); setStatus(""); scrollDown(true); }
+      els.photo.value = "";
+    } catch (error) { setStatus(error.message || "Your photo couldn't be uploaded. Please try again."); }
+    finally { S.busy = null; updateControls(); }
+  }
+  function restartChat() {
+    stopPoll(); dropSession(); S.token = null; S.caseId = null; S.state = null; S.turn = null;
+    S.ready = false; S.pending = false; S.busy = null; S.notices = []; S.reviewVersion = null;
+    S.reviewLoading = false; S.identitySignature = null; S.bootstrapped = false; S.focusOnReady = true;
+    els.helpMenu.open = false; clear(els.detailsBody); clear(document.getElementById("quickBox"));
+    var warning = document.getElementById("safetyBanner"); if (warning) warning.hidden = true;
+    delete els.reviewBox.dataset.sent; els.reviewBox.style.display = "none"; clear(els.reviewBody); clear(els.cardBox);
+    els.in.value = ""; els.consentBox.checked = false; els.photo.value = ""; clear(els.photoPreview);
+    syncMessages(true); autosize(); updateControls(); waitForBootstrap(); setStatus("Connecting…"); notify("intake.restart");
+  }
+  function needBootstrap(message) {
+    S.ready = false; updateControls(); setStatus(message);
+    var button = el("button", "Start a new request", "message-retry"); button.id = "restartChat";
+    button.onclick = restartChat; els.status.appendChild(button);
+  }
+  function restoreState(st) {
+    S.state = st; S.ready = true; S.bootstrapped = true;
+    var consent = st.facts.find(function (f) { return f.key === "consent"; }); if (consent) els.consentBox.checked = consent.value === true;
+    if (!finished()) {
+      var messages = st.messages || [], last = messages.at(-1);
+      if (S.turn && completeTurn(st)) S.turn = null;
+      if (!S.turn && last && last.role === "customer") S.turn = { key: uid(), body: last.body, messageId: last.id, acknowledged: true, createdAt: Date.parse(last.createdAt) };
+      if (S.turn && S.turn.acknowledged) S.pending = true;
+    }
+    render(); scrollDown(true); notify("intake.bootstrapped"); saveSession();
+    if (S.pending) pollUntil();
+    else if (S.turn && S.turn.failed) { setStatus("Your previous message wasn't confirmed. Please retry it."); var retry = el("button", "Retry message", "message-retry"); retry.onclick = function () { sendPending(); }; els.status.appendChild(retry); }
+    else setStatus("");
+    updateControls();
+    if (S.focusOnReady) { S.focusOnReady = false; els.in.focus(); }
+  }
+  function waitForBootstrap() {
+    if (S.bootstrapListener) window.removeEventListener("message", S.bootstrapListener);
+    clearTimeout(S.bootstrapTimer);
+    S.bootstrapListener = function (event) {
+      if (event.source !== window.parent) return;
+      var data = event.data || {}; if (data.scope !== "mendcue-bootstrap" || !data.code || !data.caseId) return;
+      window.removeEventListener("message", S.bootstrapListener); clearTimeout(S.bootstrapTimer);
+      exchange(data.code, data.caseId);
+    };
+    window.addEventListener("message", S.bootstrapListener); notify("intake.booted");
+    S.bootstrapTimer = setTimeout(function () { if (!S.ready) needBootstrap("The connection is taking longer than expected. Please try again."); }, 15000);
+  }
+  async function exchange(code, caseId) {
+    try {
+      var result = await api("/api/v1/sessions/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: code }) }).then(json);
+      S.token = result.token; S.caseId = result.caseId || caseId; S.turn = null; S.notices = []; S.reviewVersion = null; saveSession();
+      var st = await api("/api/v1/cases/" + S.caseId).then(json); restoreState(st);
+    } catch (_) { needBootstrap("I couldn't connect your chat. Please start a new request."); }
+  }
+  async function boot() {
+    setStatus("Connecting…"); updateControls();
+    if (!publicKey) { setStatus("This chat isn't configured. Please contact the business directly."); return; }
+    try {
+      var config = await api("/api/v1/public/widget-config/" + encodeURIComponent(publicKey)).then(json);
+      S.config = config;
+      if (!config.openingMessage) config.openingMessage = "Hi! I'm the AI repair assistant for " + config.businessName + ". I'll collect a few details and prepare a clear summary for your technician. Which appliance needs help, and what's happening?";
+      els.biz.textContent = config.businessName; els.privacy.textContent = config.privacyText || ""; els.demoBanner.textContent = config.demoLabel || "";
+      if (config.branding && /^#[a-fA-F0-9]{6}$/.test(config.branding.primaryColor)) document.body.style.setProperty("--primary", config.branding.primaryColor);
+      els.attachBtn.hidden = els.uploadBtn.hidden = !(config.features && config.features.photos);
+      document.title = config.businessName + " · Repair assistant"; syncMessages(true);
+      if (loadSession()) {
+        var response = await api("/api/v1/cases/" + S.caseId);
+        if (response.ok) { restoreState(await response.json()); return; }
+        if (response.status !== 401 && response.status !== 404) throw Error("Connection interrupted");
+        dropSession(); S.token = null; S.turn = null;
+      }
+      waitForBootstrap();
+    } catch (_) { needBootstrap("The chat couldn't connect. Please try again or contact the business directly."); }
+  }
+  els.newRequestBtn.onclick = function () { if (!els.newRequestBtn.disabled) restartChat(); };
+  els.send.onclick = function () { send(); };
+  els.in.addEventListener("input", function () { autosize(); updateControls(); if (S.token) saveSession(); });
+  els.in.addEventListener("keydown", function (event) { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } });
   els.humanBtn.onclick = requestHuman;
-  els.reviewBtn.onclick = function () { els.in.value = "Done — show my review"; send(); };
-  els.uploadBtn.onclick = upload;
+  els.reviewBtn.onclick = function () { if (S.state.case.conversationPhase === "review") { S.reviewVersion = null; loadReview(); } else send("Done — show my review"); };
+  els.attachBtn.onclick = els.uploadBtn.onclick = function () { els.photo.click(); };
+  els.photo.addEventListener("change", upload);
+  document.addEventListener("click", function (event) { if (!els.helpMenu.contains(event.target)) els.helpMenu.open = false; });
+  document.addEventListener("keydown", function (event) { if (event.key === "Escape") { if (els.helpMenu.open) els.helpMenu.open = false; else notify("intake.close"); } });
+  window.addEventListener("pagehide", stopPoll);
   boot();
 })();

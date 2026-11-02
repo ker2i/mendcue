@@ -13,6 +13,7 @@ export interface WorkerDeps {
   storage: StorageAdapter;
   pollMs?: number;
   heartbeat?: () => void;
+  pushSender?: import("../integrations/push.js").PushSender;
 }
 
 export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
@@ -42,6 +43,8 @@ export async function processOneJob(deps: WorkerDeps): Promise<boolean> {
     } else if (job.kind === "storage_delete") {
       if(!deps.storage.delete)throw new Error("Storage deletion not supported");
       for(const key of (job.payload.keys ?? []) as string[])await deps.storage.delete(key);
+    } else if ((job.kind === "staff_push" || job.kind === "staff_reminder")) {
+      const {deliverPush}=await import("../integrations/push.js");await deliverPush(deps.store,job,deps.pushSender);
     } else if (job.kind === "notification") {
       const { sendNotification } = await import("../integrations/notifications.js");
       await sendNotification(job);

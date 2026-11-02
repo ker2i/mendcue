@@ -161,12 +161,12 @@ async function main() {
     ok("phone layout has no horizontal overflow", overflow <= 1, `overflow=${overflow}px`);
     const frameM = await frameOf(pageM);
     await sleep(1500);
-    // Keyboard: tab order reaches composer controls, Enter sends.
+    // A nonempty draft enables Send; Tab reaches it and Enter sends.
+    await frameM.type("#in", "Fridge is warm but freezer is fine.");
     await frameM.evaluate(() => document.getElementById("in").focus());
     await pageM.keyboard.press("Tab");
     const focused = await frameM.evaluate(() => document.activeElement?.id || document.activeElement?.tagName);
     ok("keyboard tab order works", ["send", "BUTTON", "INPUT"].includes(focused), String(focused));
-    await frameM.type("#in", "Fridge is warm but freezer is fine.");
     await pageM.keyboard.press("Enter");
     await sleep(1500);
     const logM = await logText(frameM);
@@ -206,7 +206,8 @@ async function main() {
     const staff = await browser.newPage();
     staff.on("pageerror", (e) => errors.push(String(e)));
     await staff.setViewport({width:1440,height:900});
-    await staff.goto(`${BASE}/staff`, { waitUntil: "networkidle0" });
+    await staff.goto(`${BASE}/staff`, { waitUntil: "domcontentloaded" });
+    await staff.waitForSelector("#slug", {visible:true});
     await staff.type("#slug", "demo-phoenix-appliance");
     await staff.type("#email", "tech@demo-phoenix.invalid");
     await staff.type("#pw", "demo-tech-1234");
@@ -280,10 +281,9 @@ async function main() {
     await approve[0].click();
     await sleep(700);
     ok("technician approval saved", (await staff.$eval("#detail", e => e.innerText)).includes("Technician approved"));
-    await staff.reload({waitUntil:'networkidle0'});
-    // Reload returns to the authenticated login form; sign back in to reopen the stable case URL.
-    await staff.type('#slug','demo-phoenix-appliance');await staff.type('#email','tech@demo-phoenix.invalid');await staff.type('#pw','demo-tech-1234');await staff.click('#go');
-    await staff.waitForSelector('.identity-panel');
+    await staff.reload({waitUntil:'domcontentloaded'});
+    // The authenticated session and stable case URL restore automatically.
+    await staff.waitForSelector('.identity-panel', {visible:true});
     const saved = await staff.evaluate(async url => await (await fetch(url)).json(), staffCaseUrl);
     const review = saved.events.filter(e => e.type === 'technician_review').at(-1);
     ok('measured review and feedback persist after reload', review.payload.timingMethod === 'measured' && review.payload.missingFacts.includes('When cooling changed') && review.payload.unsupportedAssertions.includes('Unconfirmed component failure'));

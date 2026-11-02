@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "backendOrigin": "https://intake.quickfixphx.com",
+  "publicKey": "pk_3654eb33c095b4bfba28426f8f617ca310c087bde83e5e0c",
+  "tenantSlug": "quickfix-phoenix"
+}
