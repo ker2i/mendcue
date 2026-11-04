@@ -328,6 +328,9 @@ textarea:focus-visible, summary:focus-visible { outline: 3px solid var(--primary
 .inbox-status { background:#d7ebf8;color:#24455d;border:1px solid #bdd9ec;border-radius:999px;padding:3px 10px;font-weight:600;text-transform:capitalize; }
 .inbox-disposition { color:#43586b;font-size:14px; }
 .technician-app #detail { min-width:0; }
+.technician-app .hidden { display:none; }
+.technician-app #backInbox { display:none; }
+.technician-app #detail:empty::before { content:"Choose a request to view its technician brief.";display:block;padding:32px;background:#f8fcff;border:1px dashed #b5d2e7;border-radius:18px;color:#43586b;font-size:18px; }
 .technician-app #detail>h2 { margin-bottom:12px; }
 .technician-app .card { background:#fbfdff;border-color:#c1dced;border-radius:18px;padding:22px; }
 .technician-app #detail>.card>h3 { margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #d9e8f3; }
