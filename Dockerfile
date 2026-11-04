@@ -13,6 +13,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund
 COPY --from=build /app/dist ./dist
 COPY migrations ./migrations
+COPY scripts/model-diagnostics.mjs scripts/reconcile-model-usage.mjs ./scripts/
 RUN mkdir -p /data/media
 EXPOSE 3000
 CMD ["node", "dist/server/index.js"]

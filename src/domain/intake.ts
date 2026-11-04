@@ -342,7 +342,7 @@ export async function processTurn(
     proposed = fallbackExtract(text, messageId).map((f) => ({ ...f, certainty: "uncertain" as const }));
     await store.addEvent({
       id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "model_failure",
-      payload: { reason: "turn extraction failed; deterministic fallback" }, createdAt: now,
+      payload: { reason: "turn extraction failed; deterministic fallback", failure: e.details }, createdAt: now,
     });
   }
 
@@ -885,6 +885,10 @@ export async function submitCase(
     };
   } catch (e) {
     if (!(e instanceof ModelFailure)) throw e;
+    await store.addEvent({
+      id: randomUUID(), tenantId: tenant.id, caseId: c.id, type: "model_failure",
+      payload: { reason: "assessment failed", failure: e.details }, createdAt: now,
+    });
     assessment = {
       id: randomUUID(), tenantId: tenant.id, caseId: c.id, status: "assessment_unavailable",
       hypotheses: [], recommendedFollowUp: "Model assessment unavailable — review collected facts and contact the customer.",

@@ -9,7 +9,7 @@ import type {
 } from "./provider.js";
 import { ModelFailure, parseAssessmentResult, parseLabelResult, parseTurnResult } from "./provider.js";
 
-import { budgetedRequest } from "./usage.js";
+import { budgetedRequest, MODEL_MAX_OUTPUT_TOKENS } from "./usage.js";
 
 const BASE_URL = process.env.META_BASE_URL ?? "https://api.meta.ai/v1";
 const MODEL = process.env.META_MODEL ?? "muse-spark-1.3";
@@ -108,7 +108,7 @@ const ASSESS_SCHEMA = {
 
 async function postChat(apiKey: string, body: Record<string, unknown>, caseId: string): Promise<unknown> {
   if (BASE_URL !== "https://api.meta.ai/v1" || MODEL !== "muse-spark-1.3") throw new ModelFailure("Only the reviewed Meta endpoint/model is enabled");
-  body.max_tokens = 2048;
+  body.max_tokens = MODEL_MAX_OUTPUT_TOKENS;
   // Extraction must leave room for structured output inside the fixed token budget.
   body.reasoning_effort = "minimal";
   const serialized = JSON.stringify(body);
@@ -124,11 +124,23 @@ async function postChat(apiKey: string, body: Record<string, unknown>, caseId: s
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new ModelFailure(`Meta API ${res.status}`);
-    return (await res.json()) as unknown;
+    const safeIdentifier = (value: unknown) => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,160}$/.test(value) ? value : undefined;
+    const requestId = safeIdentifier(res.headers?.get('x-request-id') ?? res.headers?.get('x-fb-trace-id'));
+    if (!res.ok) {
+      // Preserve identifiers, never provider messages which may echo private input.
+      const error = await res.json().catch(() => null) as {error?:{code?:unknown;type?:unknown}} | null;
+      throw new ModelFailure(`Meta API ${res.status}`, {kind:'http',status:res.status,requestId,code:safeIdentifier(error?.error?.code) ?? safeIdentifier(error?.error?.type)});
+    }
+    try { return await res.json() as unknown; }
+    catch { throw new ModelFailure('Invalid Meta response JSON', {kind:'response',status:res.status,requestId}); }
   } catch (e) {
     if (e instanceof ModelFailure) throw e;
-    throw new ModelFailure(e instanceof Error ? e.message : "model request failed");
+    const timeout = ctrl.signal.aborted;
+    const cause = (e as {cause?:{code?:unknown}})?.cause?.code;
+    throw new ModelFailure(timeout ? 'Meta request timed out' : 'Meta network request failed', {
+      kind:timeout ? 'timeout' : 'network',
+      code:typeof cause === 'string' && /^[A-Z0-9_]{1,80}$/.test(cause) ? cause : undefined,
+    });
   } finally {
     clearTimeout(t);
   }

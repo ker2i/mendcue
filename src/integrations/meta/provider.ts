@@ -1,8 +1,14 @@
 // Model provider contract. Application code validates everything the model returns.
 import { z } from "zod";
 
+export interface ModelFailureDetails {
+  kind: "http" | "timeout" | "network" | "response" | "budget" | "concurrency" | "storage" | "model";
+  status?: number;
+  code?: string;
+  requestId?: string;
+}
 export class ModelFailure extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly details: ModelFailureDetails = { kind: "model" }) {
     super(message);
     this.name = "ModelFailure";
   }

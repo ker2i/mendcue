@@ -54,7 +54,11 @@ URL in the running application.
 
 Web and worker must share provider settings, SQL, media, and the usage ledger.
 The allowance is a shared local estimate, not a provider-enforced billing limit.
-Unknown request usage stops further calls pending operator reconciliation.
+Each request reserves a conservative estimate before network access. Measured token
+usage replaces it when available. Failures and responses without token counts retain
+their reservation and still count toward both caps; they do not block unrelated
+customers while allowance remains. These reservations are estimates, not invoices.
+Legacy null-cost records still require explicit reconciliation.
 `META_CASE_USD_LIMIT` and `META_CASE_CALL_LIMIT` provide additional case limits.
 
 Leave `META_IMAGE_BILLING_REVIEWED=0` until image billing/reservations have been
@@ -258,8 +262,23 @@ need their own expiry policy; case deletion does not reset spending.
 `docker compose logs --tail=100 web worker` helps diagnose startup and processing.
 Keep logs private. `node scripts/model-diagnostics.mjs /private/meta-usage.json`
 (on an operator workstation with Node) summarizes a private ledger without printing
-prompts or images. Reconcile unknown usage with provider billing before repairing
-a backed-up ledger or releasing a stale lock; do not reset spend to regain budget.
+prompts or images. Provider failures record status/code/request identifiers without
+provider messages or customer content. Prefer reconciliation against provider billing.
+For a legacy request independently verified to be **text only**, an operator can
+instead reserve the maximum enforced text-request cost (120,000 serialized bytes,
+8,192 input-token margin and 2,048 output tokens, at that record's prices):
+
+```bash
+node scripts/reconcile-model-usage.mjs /private/meta-usage.json CASE_ID RECORDED_AT \
+  'Verified text-only request; reserving the enforced maximum instead of actual billing'
+```
+
+The command locks the ledger, requires exactly one matching null-cost record, saves
+a backup and records its basis/time while preserving the failed request and all
+other spending. It does not confirm actual charges, raise allowances or clear stale
+locks. Never use text-only reconciliation for an unverified image request, and do
+not delete/reset the ledger to regain budget. New requests already retain their
+individual reservations if they fail.
 
 ## Native Node operation
 
