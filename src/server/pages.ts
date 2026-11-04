@@ -28,14 +28,14 @@ function esc(s: string): string {
 
 const ASSET_VERSION = createHash("sha256").update(APP_CSS + INTAKE_JS + STAFF_JS + HOSTED_JS + MOBILE_JS + STAFF_SW).digest("hex").slice(0, 12);
 
-function shell(opts: { title: string; css?: boolean; js?: string; staff?: boolean; body: string }): string {
+function shell(opts: { title: string; css?: boolean; js?: string; staff?: boolean; customer?: boolean; body: string }): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title>${esc(opts.title)}</title>
 ${opts.staff ? '<link rel="manifest" href="/staff/manifest.webmanifest"><meta name="theme-color" content="#102b45"><link rel="icon" href="/staff/icon-192.png">' : ""}
 ${opts.css === false ? "" : `<link rel="stylesheet" href="${opts.staff ? "/staff/app.css" : "/static/app.css"}?v=${ASSET_VERSION}">`}</head>
-<body>${opts.body}
+<body${opts.customer ? ' class="customer-app"' : ''}>${opts.body}
 ${opts.js ? `<script src="${opts.js}?v=${ASSET_VERSION}" defer></script>` : ""}
 </body></html>`;
 }
@@ -48,8 +48,8 @@ const EMBED_BODY = `
   </header>
   <div class="chat-toolbar">
     <button id="newRequestBtn" class="chat-tool chat-new-request" type="button" aria-label="Start a new repair request" disabled><span aria-hidden="true">＋</span> New request</button>
-    <button id="reviewBtn" class="chat-tool" type="button" disabled>Review request <span aria-hidden="true">↗</span></button>
-    <details class="chat-menu" id="helpMenu"><summary aria-label="More options">More <span aria-hidden="true">⌄</span></summary>
+    <button id="reviewBtn" class="chat-tool" type="button" disabled>Review request <span class="review-arrow" aria-hidden="true">↗</span></button>
+    <details class="chat-menu" id="helpMenu"><summary aria-label="More options"><span class="chat-menu-label">More</span> <span class="chat-menu-icon" aria-hidden="true">⋯</span></summary>
       <div class="chat-menu-panel"><button id="humanBtn" type="button" disabled>Ask for a person</button><button id="uploadBtn" type="button" disabled>Attach a label photo</button>
       <details class="collected" id="detailsBox"><summary>Your repair details</summary><div id="detailsBody"></div></details>
       <details class="privacy-info"><summary>About this assistant & privacy</summary><p id="privacy"></p><p id="demoBanner" class="demo-banner"></p><div id="steps" class="steps" aria-label="Progress"></div></details></div>
@@ -69,7 +69,7 @@ const EMBED_BODY = `
     <div class="composer">
       <input type="file" id="photo" class="visually-hidden" accept="image/jpeg,image/png,image/webp" aria-label="Label photo">
       <button id="attachBtn" class="attach-button" type="button" aria-label="Attach a label photo" title="Attach a label photo" disabled>+</button>
-      <textarea id="in" rows="1" maxlength="4000" placeholder="Message the repair assistant…" aria-label="Message" disabled></textarea>
+      <textarea id="in" rows="1" maxlength="4000" placeholder="Type your message…" aria-label="Message" disabled></textarea>
       <button id="send" class="send-button" type="button" aria-label="Send message" title="Send message" disabled>↑</button>
     </div>
     <p class="chat-footnote">AI helps collect details. A person confirms your repair.</p>
@@ -159,7 +159,7 @@ export function registerPages(app: express.Express, deps: AppDeps): void {
   app.get("/embed", (_req, res) => {
     res.setHeader("content-type", "text/html");
     res.setHeader("content-security-policy", PAGE_CSP);
-    res.send(shell({ title: "Service intake", js: "/static/intake.js", body: EMBED_BODY }));
+    res.send(shell({ title: "Service intake", customer: true, js: "/static/intake.js", body: EMBED_BODY }));
   });
 
   // Hosted business website generated from tenant configuration (Screen 1).
@@ -173,6 +173,7 @@ export function registerPages(app: express.Express, deps: AppDeps): void {
       : t.contact.email ? `Email us at ${esc(t.contact.email)}.` : "Direct contact details to be supplied.";
     res.send(shell({
       title: `${t.name} — appliance service`,
+      customer: true,
       body: `
 <div class="page">
   <div class="demo-banner">${esc(t.demoLabel)}. Demo site — details are placeholders until the business supplies real information.</div>
