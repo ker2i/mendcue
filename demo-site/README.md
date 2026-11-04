@@ -5,6 +5,10 @@ No server, build step, API key, model inference, analytics, cookies or browser
 storage is required. Inputs and photo previews stay in the current tab; JSON
 exports are explicitly downloaded by the visitor. Refresh resets the demo.
 
+For live MendCue customer intake, visit **[QuickFix Appliance Repair](https://quickfixphx.com/)**
+and choose **Start a repair request**. This directory is the separate scripted
+walkthrough; its replies and technician actions do not call the live backend.
+
 ## Preview and verification
 
 From the repository root:

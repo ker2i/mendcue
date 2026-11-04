@@ -4,6 +4,13 @@ MendCue turns appliance symptoms into a service request a technician can review
 before a visit. It includes an embeddable website chat, a hosted intake page, a
 technician workspace with internal scheduling, and a REST API.
 
+**[Try the live MendCue demo on QuickFix Appliance Repair](https://quickfixphx.com/)**
+
+Open the website and choose **Start a repair request** to use the live customer
+chat. The technician workspace requires authorized staff access. To reproduce the
+customer-to-technician flow locally, use the [local demo instructions](#run-a-local-demo)
+and synthetic staff credentials below.
+
 Live AI is powered by **Meta Muse Spark**, validated with `muse-spark-1.3`, for
 structured fact extraction and draft assessments. Muse Spark also supports image
 understanding; MendCue includes an optional appliance-label transcription path.
