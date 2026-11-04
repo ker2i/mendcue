@@ -98,7 +98,9 @@
     var nRev = cases.filter(function (c) { return c.safetyStatus === "needs_review" || c.safetyStatus === "stop_use" || c.safetyStatus === "emergency"; }).length;
     var nHum = cases.filter(function (c) { return c.disposition === "human_requested"; }).length;
     [["New", nNew], ["Needs review", nRev], ["Human requested", nHum], ["Total", cases.length]].forEach(function (p) {
-      box.appendChild(el("span", p[0] + ": " + p[1], "counter"));
+      var card = el("span", null, "counter");
+      card.append(el("span", p[0] + ": "), el("strong", String(p[1])));
+      box.appendChild(card);
     });
   }
 
@@ -127,13 +129,15 @@
     if (!list.length) box.appendChild(el("p", "No cases match.", "muted"));
     list.forEach(function (c) {
       var b = el("button", null, "inbox-row");
-      var strong = el("b", c.reference + "  ");
-      b.appendChild(strong);
-      b.appendChild(document.createTextNode(
-        (c.appliance || "?") + " — " + ((c.complaint || "").slice(0, 90)) +
-        "  |  " + (c.zip || "?") + "  |  " + readable(c.safetyStatus) + "  |  " + readable(c.workflowStatus) +
-        (c.disposition !== "pending" ? "  |  " + readable(c.disposition) : "")
-      ));
+      b.dataset.caseId = c.id;
+      if (c.id === S.openId) b.setAttribute("aria-current", "true");
+      var top = el("span", null, "inbox-card-top");
+      top.append(el("b", c.reference), el("span", readable(c.appliance || "Appliance"), "inbox-appliance"));
+      var meta = el("span", null, "inbox-card-meta");
+      meta.append(el("span", "ZIP " + (c.zip || "unknown")), el("span", readable(c.workflowStatus), "inbox-status"));
+      b.append(top, el("span", (c.complaint || "No issue described yet").slice(0, 160), "inbox-complaint"), meta);
+      if (["needs_review", "stop_use", "emergency"].includes(c.safetyStatus)) b.appendChild(flag(readable(c.safetyStatus), true));
+      if (c.disposition !== "pending" && c.disposition !== "ready_for_review") b.appendChild(el("span", readable(c.disposition), "inbox-disposition"));
       b.onclick = function () { openCase(c.id); };
       box.appendChild(b);
     });
@@ -146,6 +150,10 @@
   function openCase(id) {
     var paused = S.openId && S.openId !== id ? pauseActiveReview() : Promise.resolve();
     S.openId = id;
+    document.querySelectorAll("#inbox .inbox-row").forEach(function(row) {
+      if (row.dataset.caseId === id) row.setAttribute("aria-current", "true");
+      else row.removeAttribute("aria-current");
+    });
     if (location.hash !== "#case=" + encodeURIComponent(id)) history.pushState(null, "", "#case=" + encodeURIComponent(id));
     document.getElementById("inboxPane").classList.add("case-open");
     return paused.then(function() { return staffFetch("/api/v1/staff/cases/" + id); }).then(function (r) { return r.json(); }).then(function (j) {

@@ -286,3 +286,78 @@ textarea:focus-visible, summary:focus-visible { outline: 3px solid var(--primary
 /* Technician home-screen app. */
 .technician-app{max-width:1200px;padding-bottom:40px}.technician-app input,.technician-app select,.technician-app textarea{font-size:16px;max-width:100%;min-height:48px}.technician-app .btn,.technician-app button.inbox-row,.technician-app .appointment-row{min-height:48px}.technician-app #app{background:#f5f8fb;border-color:#e0e8ee}.technician-app #app>p:first-of-type{display:flex;gap:6px;flex-wrap:wrap}.technician-app .card{border-radius:16px}.technician-app h1{letter-spacing:-.035em}.technician-app #appNotice:empty{display:none}.technician-app #calendar{padding:12px 0}.calendar-controls,.job-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.calendar-controls label{flex:1 1 180px}.calendar-controls input{width:100%}.appointment-row{display:flex;flex-direction:column;gap:8px;padding:18px;margin:12px 0;width:100%;text-align:left;border:1px solid #dfe7ee;border-radius:14px;background:white;color:#102b45;font:inherit;cursor:pointer}.appointment-row span{font-size:14px;color:#526777}.appointment-row:hover{border-color:#158bd0}.empty-state{padding:32px 16px;background:white;border-radius:14px;color:#657a89}.visit-panel label,.technician-app #jobNotes label{display:flex;flex-direction:column;gap:6px;font-size:13px;margin:14px 0}.visit-panel textarea,.technician-app #jobNote{min-height:90px}.visit-panel summary{cursor:pointer;min-height:48px;padding:12px 0;font-weight:600}.visit-panel .job-actions{margin:16px 0}.technician-app #jobNoteStatus,.technician-app #visitStatus{font-size:13px;line-height:1.6}.technician-app #deviceSettings .card{background:#fff}.technician-app .btn:focus-visible,.appointment-row:focus-visible{outline:3px solid #158bd0;outline-offset:3px}.technician-app #inboxPane.case-open #backInbox{margin-bottom:12px}@media(max-width:650px){.technician-app{padding:14px 10px}.technician-app #app{padding:12px}.technician-app #who{display:block;font-size:13px;line-height:1.5}.technician-app #detail>h2{font-size:22px}.technician-app .card{padding:14px}.technician-app #app>p:first-of-type{position:relative}.technician-app .btn{padding:10px 12px}.calendar-controls .btn{flex:1}.technician-app .brief{grid-template-columns:1fr}.technician-app .brief dt{margin-top:10px}.technician-app #search{width:100%}.technician-app #inbox{overflow-wrap:anywhere}.job-actions .btn{flex:1 1 120px}.technician-app .dump{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}}
 @media(max-width:650px){.calendar-controls{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.calendar-controls label{grid-column:1/-1}.calendar-controls .btn{min-width:0;white-space:nowrap;word-break:normal;padding:10px 6px}.calendar-controls .btn:last-child{grid-column:1/-1}}
+
+/* Repair workspace: the same calm Tar Heel blue as the customer conversation. */
+.technician-body,.technician-app {
+  --canvas:#edf5fb;--surface:#fbfdff;--ink:#14232e;--muted:#43586b;
+  --border:#c9dfef;--primary:#4b9cd3;--primary-ink:#102330;
+  color:var(--ink);font-size:17px;line-height:1.65;
+}
+.technician-body { background:#edf5fb; }
+.technician-app { padding-top:30px; }
+.technician-app h1 { font-size:32px;line-height:1.25;letter-spacing:-.035em;margin:0 0 20px; }
+.technician-app h2 { font-size:24px;line-height:1.35; }
+.technician-app h3 { font-size:20px;line-height:1.4; }
+.technician-app #app { background:#e5f1fa;border-color:#bfdbee;border-radius:24px;padding:24px;box-shadow:0 8px 32px #163c5a08; }
+.technician-app #login { max-width:540px;background:#f8fcff;border-color:#bfdbee;border-radius:22px;padding:28px;box-shadow:0 8px 32px #163c5a08; }
+.technician-app #login input { width:100%; }
+.technician-app #who { display:inline-block;padding:8px 12px;border-radius:10px;background:#d5eaf8;color:#304d63;font-size:15px; }
+.technician-app #app>p:first-of-type { gap:8px;padding:16px 0;margin:0 0 18px;border-bottom:1px solid #bfdbee; }
+.technician-app .btn { font-size:16px;font-weight:550;line-height:1.4;border-radius:12px;background:#fbfdff;border-color:#b5d2e7;color:#1d3548;padding:12px 16px; }
+.technician-app .btn:hover:not(:disabled) { background:#d5eaf8;border-color:#75add2; }
+.technician-app .btn-primary,.technician-app #tabInbox { background:#4b9cd3;color:#102330;border-color:#3887bb;font-weight:650; }
+.technician-app .btn-danger { background:#b42318;color:#fff;border-color:#b42318; }
+.technician-app :is(input,select,textarea) { font:inherit;font-size:17px;color:#14232e;border:1px solid #b5d2e7;border-radius:12px;background:#fbfdff;padding:12px; }
+.technician-app :is(input,textarea)::placeholder { color:#526a7d;opacity:1; }
+.technician-app :is(button,input,textarea,select,summary,a):focus-visible { outline:3px solid #245e87;outline-offset:3px; }
+.technician-app .counters { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 20px; }
+.technician-app .counter { display:flex;flex-direction:column;justify-content:space-between;gap:4px;background:#f8fcff;border:1px solid #c0dced;border-radius:16px;padding:14px 16px;font-size:15px;color:#43586b; }
+.technician-app .counter strong { display:block;font-size:28px;line-height:1.2;font-weight:700;color:#14232e; }
+.technician-app #inboxPane>p { display:flex;flex-wrap:wrap;gap:10px;margin:0 0 20px; }
+.technician-app #search { flex:1 1 250px;min-width:0; }
+.technician-app #statusFilter { flex:0 1 210px;min-width:0; }
+.technician-app #inbox { min-width:0; }
+.technician-app #inbox>h3 { margin:0 0 12px;color:#304d63; }
+.technician-app .inbox-row { display:flex;flex-direction:column;gap:10px;width:100%;padding:16px;margin:0 0 12px;background:#fbfdff;border:1px solid #bdd9ec;border-radius:16px;color:#14232e;font-size:17px;line-height:1.55;box-shadow:0 2px 5px #163c5a04; }
+.technician-app .inbox-row:hover { background:#edf7fe;border-color:#75add2; }
+.technician-app .inbox-row[aria-current="true"] { background:#d9edfb;border-color:#4b9cd3;box-shadow:inset 4px 0 #4b9cd3; }
+.inbox-card-top { display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:15px; }
+.inbox-appliance { text-transform:capitalize;color:#43586b;font-size:15px; }
+.inbox-complaint { display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;overflow-wrap:anywhere; }
+.inbox-card-meta { display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;color:#43586b;font-size:14px; }
+.inbox-status { background:#d7ebf8;color:#24455d;border:1px solid #bdd9ec;border-radius:999px;padding:3px 10px;font-weight:600;text-transform:capitalize; }
+.inbox-disposition { color:#43586b;font-size:14px; }
+.technician-app #detail { min-width:0; }
+.technician-app #detail>h2 { margin-bottom:12px; }
+.technician-app .card { background:#fbfdff;border-color:#c1dced;border-radius:18px;padding:22px; }
+.technician-app #detail>.card>h3 { margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #d9e8f3; }
+.technician-app .brief { margin:0;font-size:18px;line-height:1.7; }
+.technician-app .brief dt { font-size:15px;color:#43586b;font-weight:650;margin-top:18px; }
+.technician-app .brief dd { margin-top:4px; }
+.technician-app .tag { display:inline-block;white-space:normal;margin:4px 0 0 6px;padding:2px 8px;font-size:13px;color:#43586b;background:#edf5fb;border-color:#ccdfed;border-radius:7px; }
+.technician-app .flag { font-size:14px;padding:4px 10px;background:#e8f3fb;border-color:#bed9ec;color:#304d63; }
+.technician-app .flag-danger { background:#fff0ed;border-color:#dfa69e;color:#8d2018; }
+.technician-app :is(.review-panel,.identity-panel) label,.technician-app .visit-panel label { font-size:16px; }
+.technician-app :is(.review-panel,.identity-panel,.visit-panel) summary { cursor:pointer;min-height:44px; }
+.technician-app :is(#jobNoteStatus,#visitStatus) { font-size:15px;color:#43586b; }
+.technician-app .appointment-row { background:#fbfdff;border-color:#bdd9ec;border-radius:16px;font-size:18px;color:#14232e; }
+.technician-app .appointment-row span { color:#43586b;font-size:15px; }
+.technician-app .empty-state { background:#f8fcff;color:#43586b;border:1px solid #c1dced; }
+@media(min-width:1100px) { .technician-app #inboxPane { grid-template-columns:320px minmax(0,1fr);column-gap:24px; } }
+@media(max-width:650px) {
+  .technician-app { padding:20px 10px 32px; }
+  .technician-app h1 { font-size:28px; }
+  .technician-app #app { padding:14px;border-radius:20px; }
+  .technician-app #who { font-size:14px;line-height:1.5; }
+  .technician-app .counters { grid-template-columns:repeat(2,minmax(0,1fr));gap:10px; }
+  .technician-app .counter { padding:12px; }
+  .technician-app .counter strong { font-size:26px; }
+  .technician-app .card { padding:16px; }
+  .technician-app .btn { padding:10px 12px; }
+  .technician-app :is(input,select,textarea) { font-size:17px; }
+  .technician-app #statusFilter { flex:1 1 100%; }
+  .technician-app .inbox-row { padding:14px; }
+  .technician-app #detail>h2 { font-size:23px; }
+  .technician-app .brief { font-size:18px; }
+  .technician-app .calendar-controls .btn { padding:10px 6px; }
+}

@@ -33,9 +33,9 @@ function shell(opts: { title: string; css?: boolean; js?: string; staff?: boolea
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title>${esc(opts.title)}</title>
-${opts.staff ? '<link rel="manifest" href="/staff/manifest.webmanifest"><meta name="theme-color" content="#102b45"><link rel="icon" href="/staff/icon-192.png">' : ""}
+${opts.staff ? '<link rel="manifest" href="/staff/manifest.webmanifest"><meta name="theme-color" content="#4b9cd3"><link rel="icon" href="/staff/icon-192.png">' : ""}
 ${opts.css === false ? "" : `<link rel="stylesheet" href="${opts.staff ? "/staff/app.css" : "/static/app.css"}?v=${ASSET_VERSION}">`}</head>
-<body${opts.customer ? ' class="customer-app"' : ''}>${opts.body}
+<body${opts.customer ? ' class="customer-app"' : opts.staff ? ' class="technician-body"' : ''}>${opts.body}
 ${opts.js ? `<script src="${opts.js}?v=${ASSET_VERSION}" defer></script>` : ""}
 </body></html>`;
 }
@@ -207,7 +207,7 @@ export function registerPages(app: express.Express, deps: AppDeps): void {
     res.setHeader("content-security-policy", PAGE_CSP+"; worker-src 'self'; manifest-src 'self'");
     res.send(shell({ title: "MendCue Technician", staff:true, js: "/staff/app.js", body: staffBody() }));
   });
-  app.get("/staff/manifest.webmanifest",(_req,res)=>res.type("application/manifest+json").set("Cache-Control","no-cache").json({id:"/staff/",name:"MendCue Technician",short_name:"MendCue",start_url:"/staff/",scope:"/staff/",display:"standalone",background_color:"#f4f7fa",theme_color:"#102b45",icons:[192,512].map(size=>({src:`/staff/icon-${size}.png`,sizes:`${size}x${size}`,type:"image/png",purpose:"any maskable"}))}));
+  app.get("/staff/manifest.webmanifest",(_req,res)=>res.type("application/manifest+json").set("Cache-Control","no-cache").json({id:"/staff/",name:"MendCue Technician",short_name:"MendCue",start_url:"/staff/",scope:"/staff/",display:"standalone",background_color:"#edf5fb",theme_color:"#4b9cd3",icons:[192,512].map(size=>({src:`/staff/icon-${size}.png`,sizes:`${size}x${size}`,type:"image/png",purpose:"any maskable"}))}));
   app.get("/staff/app.css",(_req,res)=>res.type("css").set("Cache-Control","no-cache").send(APP_CSS));
   app.get("/staff/app.js",(_req,res)=>res.type("application/javascript").set("Cache-Control","no-cache").send(MOBILE_JS.replaceAll("__APP_VERSION__",ASSET_VERSION)+"\n"+STAFF_JS));
   app.get("/staff/sw.js",(_req,res)=>res.type("application/javascript").set("Cache-Control","no-store").set("Service-Worker-Allowed","/staff/").send(STAFF_SW.replaceAll("__APP_VERSION__",ASSET_VERSION)));
