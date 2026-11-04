@@ -4,11 +4,19 @@ MendCue turns appliance symptoms into a service request a technician can review
 before a visit. It includes an embeddable website chat, a hosted intake page, a
 technician workspace with internal scheduling, and a REST API.
 
-Live AI uses Meta Muse Spark (`muse-spark-1.3`) for structured fact extraction and
-draft assessments. A separate, visibly labeled fixture mode runs without an API
-key. Photo transcription requires live mode and an explicit image-billing gate.
+Live AI is powered by **Meta Muse Spark**, validated with `muse-spark-1.3`, for
+structured fact extraction and draft assessments. Muse Spark also supports image
+understanding; MendCue includes an optional appliance-label transcription path.
+A separate, visibly labeled fixture mode runs without an API key. Photo
+transcription requires live mode and an explicit image-billing gate; enabling photo
+uploads alone does not enable AI image reading.
 Manufacturer manuals are operator-imported and reviewed; the included example
 playbooks do not establish model-specific coverage.
+
+This release pins the tested model for reproducible results and spending estimates.
+Newer Muse Spark versions can be adopted after checking structured outputs, image
+behavior, and pricing and updating the model guard. Compatibility with untested
+future versions is not implied. See [model versions and images](docs/deployment.md#model-versions-and-images).
 
 ## Prerequisites
 

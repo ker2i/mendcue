@@ -65,6 +65,23 @@ Leave `META_IMAGE_BILLING_REVIEWED=0` until image billing/reservations have been
 reviewed for your account. Manual identity entry remains available. SMTP and push
 are optional and can stay disabled during initial setup.
 
+### Model versions and images
+
+MendCue uses the Meta Muse Spark family; this release is validated with and pins
+`muse-spark-1.3`. Both startup validation and the API adapter reject other model IDs.
+Changing `META_MODEL` alone does not enable a newer version. Before adopting one,
+validate its structured-output schemas, supported request parameters, image handling,
+latency, and prices, update both model guards and pricing settings, then rerun the
+text and photo workflows. Historical usage records retain their original model and
+prices.
+
+Muse Spark 1.3 itself supports image understanding through the Chat Completions
+endpoint used here. See Meta's [image-understanding documentation](https://dev.meta.ai/docs/image-understanding).
+MendCue's photo upload/storage and AI label transcription are separate capabilities.
+Live label transcription requires `META_IMAGE_BILLING_REVIEWED=1` after reviewing
+the image reservation and allowance. Leave it disabled if that deployment has only
+been verified for text intake; changing model-version wording does not enable it.
+
 ## 3. Build, migrate, and set the runtime password
 
 ```bash
